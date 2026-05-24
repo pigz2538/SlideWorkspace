@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkspaceTool</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="brand-dot"></span>
+    <span class="brand-name">WorkspaceTool</span>
+    <span class="brand-version" id="version-tag">v2.0</span>
+  </div>
+  <div class="appbar-spacer"></div>
+  <div class="appbar-actions">
+    <button class="btn-ghost" id="btn-add" data-i18n="header.add"></button>
+    <button class="btn-ghost" id="btn-import" data-i18n="header.import"></button>
+    <button class="btn-ghost" id="btn-export" data-i18n="header.export"></button>
+    <button class="btn-ghost" id="btn-rules" data-i18n="header.rules"></button>
+    <button class="btn-primary" id="btn-settings" data-i18n="header.settings"></button>
+    <button class="btn-ghost btn-lang" id="btn-lang" title="Switch language">中 / EN</button>
+  </div>
+</header>
+
+<main id="workspace-grid" class="workspace-grid"></main>
+
+<footer class="appfoot">
+  <span class="hint" data-i18n-html="footer.hint"></span>
+  <span class="status" id="status-line"></span>
+</footer>
+
+<!-- Settings drawer -->
+<aside id="drawer-settings" class="drawer">
+  <div class="drawer-head">
+    <h2 data-i18n="drawer.settings.title"></h2>
+    <button class="btn-close" data-close="drawer-settings">✕</button>
+  </div>
+  <div class="drawer-body">
+    <section class="section">
+      <h3 data-i18n="settings.global"></h3>
+      <div class="row">
+        <label data-i18n="settings.panelHotkey"></label>
+        <button class="hotkey-input" data-setting="panelHotkey"></button>
+      </div>
+      <div class="row">
+        <label data-i18n="settings.managerHotkey"></label>
+        <button class="hotkey-input" data-setting="managerHotkey"></button>
+      </div>
+      <div class="row">
+        <label data-i18n="settings.reloadHotkey"></label>
+        <button class="hotkey-input" data-setting="reloadHotkey"></button>
+      </div>
+      <div class="row">
+        <label data-i18n="settings.undoHotkey"></label>
+        <button class="hotkey-input" data-setting="undoHotkey"></button>
+      </div>
+      <div class="row">
+        <label data-i18n="settings.prevWorkspaceHotkey"></label>
+        <button class="hotkey-input" data-setting="prevWorkspaceHotkey"></button>
+      </div>
+      <div class="row">
+        <label data-i18n="settings.nextWorkspaceHotkey"></label>
+        <button class="hotkey-input" data-setting="nextWorkspaceHotkey"></button>
+      </div>
+    </section>
+
+    <section class="section">
+      <h3 data-i18n="settings.behavior"></h3>
+      <div class="row">
+        <label data-i18n="settings.switchToast"></label>
+        <input type="checkbox" data-setting-bool="switchToast">
+      </div>
+      <div class="row">
+        <label data-i18n="settings.trayBadge"></label>
+        <input type="checkbox" data-setting-bool="trayBadge">
+      </div>
+      <div class="row">
+        <label data-i18n="settings.focusMode"></label>
+        <input type="checkbox" data-setting-bool="focusMode">
+      </div>
+      <div class="row">
+        <label data-i18n="settings.captureThumbnails"></label>
+        <input type="checkbox" data-setting-bool="captureThumbnails">
+      </div>
+      <div class="row">
+        <label data-i18n="settings.previewSize"></label>
+        <select id="preview-size-select" data-setting-select="previewSize">
+          <option value="xs">XS · 240×150</option>
+          <option value="sm">S · 400×250</option>
+          <option value="md">M · 560×350</option>
+          <option value="lg">L · 800×500</option>
+          <option value="xl">XL · 1100×690</option>
+          <option value="xxl">XXL · 1280×800</option>
+        </select>
+      </div>
+      <div class="row">
+        <label data-i18n="settings.stickyEnabled"></label>
+        <input type="checkbox" data-setting-bool="stickyEnabled">
+      </div>
+    </section>
+
+    <section class="section">
+      <h3 data-i18n="settings.stickyTitle"></h3>
+      <p class="muted" data-i18n="settings.stickyDesc"></p>
+      <div class="follow-list" id="sticky-list"></div>
+      <div class="follow-add">
+        <input type="text" id="sticky-pattern" data-i18n-placeholder="settings.stickyPlaceholder">
+        <button class="btn-secondary" id="btn-sticky-add" data-i18n="button.add"></button>
+        <button class="btn-ghost" id="btn-sticky-pick" data-i18n="button.pick"></button>
+      </div>
+    </section>
+  </div>
+</aside>
+
+<!-- Rules drawer -->
+<aside id="drawer-rules" class="drawer">
+  <div class="drawer-head">
+    <h2 data-i18n="drawer.rules.title"></h2>
+    <button class="btn-close" data-close="drawer-rules">✕</button>
+  </div>
+  <div class="drawer-body">
+    <section class="section">
+      <h3 data-i18n="rules.blacklist"></h3>
+      <p class="muted" data-i18n="rules.blacklistDesc"></p>
+      <div class="follow-list" id="blacklist"></div>
+      <div class="follow-add">
+        <input type="text" id="blacklist-pattern" data-i18n-placeholder="rules.blacklistPlaceholder">
+        <button class="btn-secondary" id="btn-blacklist-add" data-i18n="button.add"></button>
+      </div>
+    </section>
+
+    <section class="section">
+      <h3 data-i18n="rules.perApp"></h3>
+      <p class="muted" data-i18n="rules.perAppDesc"></p>
+      <table class="perapp-table">
+        <thead>
+          <tr>
+            <th data-i18n="rules.exe"></th>
+            <th data-i18n="rules.maxim"></th>
+            <th data-i18n="rules.monitor"></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="perapp-body"></tbody>
+      </table>
+      <div class="follow-add">
+        <input type="text" id="perapp-exe" placeholder="chrome.exe">
+        <button class="btn-secondary" id="btn-perapp-add" data-i18n="rules.addRule"></button>
+      </div>
+    </section>
+  </div>
+</aside>
+
+<!-- Hotkey recorder modal -->
+<div id="recorder-modal" class="modal">
+  <div class="modal-body">
+    <h3 id="recorder-title" data-i18n="recorder.title"></h3>
+    <p class="muted" data-i18n-html="recorder.desc"></p>
+    <div class="recorder-display" id="recorder-display">…</div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="recorder-clear" data-i18n="button.clear"></button>
+      <button class="btn-ghost" id="recorder-cancel" data-i18n="button.cancel"></button>
+      <button class="btn-primary" id="recorder-ok" data-i18n="button.ok"></button>
+    </div>
+  </div>
+</div>
+
+<!-- Add window picker modal -->
+<div id="picker-modal" class="modal">
+  <div class="modal-body wide">
+    <h3 data-i18n="picker.title"></h3>
+    <p class="muted" data-i18n="picker.desc"></p>
+    <ul class="live-windows" id="live-windows"></ul>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="picker-cancel" data-i18n="button.cancel"></button>
+    </div>
+  </div>
+</div>
+
+<!-- Import modal -->
+<div id="import-modal" class="modal">
+  <div class="modal-body wide">
+    <h3 data-i18n="import.title"></h3>
+    <p class="muted" data-i18n="import.desc"></p>
+    <textarea id="import-text" rows="14" spellcheck="false"></textarea>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="import-cancel" data-i18n="button.cancel"></button>
+      <button class="btn-primary" id="import-ok" data-i18n="button.import"></button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

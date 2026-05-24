@@ -1,0 +1,22 @@
+# User data & runtime artifacts
+settings.json
+workspaces.json
+rules.json
+debug_script_out.txt
+preplan.md
+thumbs/
+.edge_profile/
+
+# Portable AutoHotkey runtime (user-provided)
+# Download from https://www.autohotkey.com/download/ and extract into autohotkey/
+autohotkey/
+
+# Editor / OS
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+.history/
