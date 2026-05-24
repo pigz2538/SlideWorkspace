@@ -39,7 +39,7 @@ global F_SETTINGS   := A_ScriptDir "\settings.json"
 global F_WORKSPACES := A_ScriptDir "\workspaces.json"
 global F_RULES      := A_ScriptDir "\rules.json"
 global F_DEBUG      := A_ScriptDir "\debug_script_out.txt"
-global DEBUG_ENABLED := true
+global DEBUG_ENABLED := false
 global D_UI         := A_ScriptDir "\ui"
 
 global g_Settings       := Map()
@@ -1065,7 +1065,8 @@ FocusModeApply(keepHwnds) {
             if !WinExist("ahk_id " h)
                 continue
             if keep.Has(h) {
-                WinRestore "ahk_id " h
+                if WinGetMinMax("ahk_id " h) = -1
+                    WinRestore "ahk_id " h
             } else {
                 newHidden.Push(h)
             }
@@ -2329,9 +2330,6 @@ WindowReposition(hwnd, info) {
         startTick := A_TickCount
         x := info["x"], y := info["y"], w := info["w"], h := info["h"]
         state := info["state"]
-        targetMonitor := info.Has("monitor") ? info["monitor"] : 1
-        if (targetMonitor < 1 || targetMonitor > MonitorGetCount())
-            targetMonitor := 1
         if !PosOnAnyMonitor(x, y, w, h) {
             MonitorGetWorkArea 1, &l, &t, &r, &b
             x := l + 80, y := t + 80
@@ -2339,15 +2337,10 @@ WindowReposition(hwnd, info) {
             h := Min(h, b - t - 160)
         }
         curState := WinGetMinMax("ahk_id " hwnd)
-        prevState := curState
         DebugLog("reposition enter hwnd=" hwnd " exe='" info.Get("exe", "") "' state=" state " curState=" curState)
         ; Already in target minimized state — no work, no flicker.
         if (state = -1 && curState = -1)
             return true
-        if (state = 1 && WindowIsEffectivelyMaximized(hwnd, targetMonitor)) {
-            DebugLog("reposition keep-maximized hwnd=" hwnd)
-            return true
-        }
         ; If target is minimized but window is currently shown, set normal
         ; position first via SetWindowPos (no visible move), then minimize.
         if (state = -1) {
@@ -2358,91 +2351,27 @@ WindowReposition(hwnd, info) {
             WinMinimize "ahk_id " hwnd
             return true
         }
+        ; For maximized windows, do not move to saved/safe rectangles.
+        ; Windows preserves maximized state across minimize/restore; if not,
+        ; a single WinMaximize is enough. Moving first is what caused the
+        ; “maximized then shrinks to safe size” regression.
+        if (state = 1) {
+            if (curState = -1)
+                WinRestore "ahk_id " hwnd
+            if (WinGetMinMax("ahk_id " hwnd) != 1)
+                WinMaximize "ahk_id " hwnd
+            DebugLog("reposition maximize-only hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
+            return true
+        }
         ; Restore first if currently min/max so WinMove can size correctly
         if (curState != 0)
             WinRestore "ahk_id " hwnd
-        if (state = 1) {
-            restoredState := WinGetMinMax("ahk_id " hwnd)
-            if (prevState != 0 && restoredState != 0) {
-                DebugLog("reposition restore-preserved-max hwnd=" hwnd " prev=" prevState " now=" restoredState)
-                return true
-            }
-            if (WindowIsEffectivelyMaximized(hwnd, targetMonitor)) {
-                DebugLog("reposition restore-kept-maximized hwnd=" hwnd)
-                return true
-            }
-            WinGetPos &cx, &cy, &cw, &ch, "ahk_id " hwnd
-            currentMonitor := MonitorAtPoint(cx + cw//2, cy + ch//2)
-            if (currentMonitor = targetMonitor) {
-                DebugLog("reposition maximize-in-place hwnd=" hwnd " monitor=" targetMonitor)
-                WinMaximize "ahk_id " hwnd
-                if (WindowIsEffectivelyMaximized(hwnd, targetMonitor))
-                    return true
-            }
-            MonitorGetWorkArea targetMonitor, &ml, &mt, &mr, &mb
-            normalW := Min(Max(400, (mr - ml) - 160), mr - ml)
-            normalH := Min(Max(300, (mb - mt) - 160), mb - mt)
-            normalX := ml + Max(0, ((mr - ml) - normalW) // 2)
-            normalY := mt + Max(0, ((mb - mt) - normalH) // 2)
-            WinMove normalX, normalY, normalW, normalH, "ahk_id " hwnd
-            DebugLog("reposition before maximize hwnd=" hwnd " monitor=" targetMonitor)
-            WinMaximize "ahk_id " hwnd
-            SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, normalX, normalY, normalW, normalH), -180)
-            SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, normalX, normalY, normalW, normalH), -600)
-            SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, normalX, normalY, normalW, normalH), -1400)
-            DebugLog("reposition exit hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
-            return true
-        }
         WinMove x, y, w, h, "ahk_id " hwnd
         DebugLog("reposition after move hwnd=" hwnd " ms=" (A_TickCount - startTick))
         DebugLog("reposition exit hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
         return true
     } catch {
         DebugLog("reposition error hwnd=" hwnd)
-        return false
-    }
-}
-
-WindowRetryMaximize(hwnd, x, y, w, h) {
-    try {
-        if !WinExist("ahk_id " hwnd)
-            return
-        targetMonitor := MonitorAtPoint(x + w//2, y + h//2)
-        if WindowIsEffectivelyMaximized(hwnd, targetMonitor)
-            return
-        minmax := WinGetMinMax("ahk_id " hwnd)
-        if (minmax = -1)
-            WinRestore "ahk_id " hwnd
-        WinMaximize "ahk_id " hwnd
-        if WindowIsEffectivelyMaximized(hwnd, targetMonitor)
-            return
-        WinRestore "ahk_id " hwnd
-        WinMove x, y, w, h, "ahk_id " hwnd
-        WinMaximize "ahk_id " hwnd
-        DebugLog("retry maximize hwnd=" hwnd " state=" WinGetMinMax("ahk_id " hwnd) " eff=" WindowIsEffectivelyMaximized(hwnd, targetMonitor))
-    }
-}
-
-WindowIsEffectivelyMaximized(hwnd, targetMonitor := 0) {
-    try {
-        if DllCall("user32\IsZoomed", "ptr", hwnd)
-            return true
-        WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
-        if (w <= 0 || h <= 0)
-            return false
-        if !targetMonitor
-            targetMonitor := MonitorAtPoint(x + w//2, y + h//2)
-        if (targetMonitor < 1 || targetMonitor > MonitorGetCount())
-            return false
-        MonitorGetWorkArea targetMonitor, &ml, &mt, &mr, &mb
-        workW := mr - ml
-        workH := mb - mt
-        tol := 24
-        return Abs(x - ml) <= tol
-            && Abs(y - mt) <= tol
-            && Abs(w - workW) <= (tol * 2)
-            && Abs(h - workH) <= (tol * 2)
-    } catch {
         return false
     }
 }
