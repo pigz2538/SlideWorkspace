@@ -39,7 +39,7 @@ global F_SETTINGS   := A_ScriptDir "\settings.json"
 global F_WORKSPACES := A_ScriptDir "\workspaces.json"
 global F_RULES      := A_ScriptDir "\rules.json"
 global F_DEBUG      := A_ScriptDir "\debug_script_out.txt"
-global DEBUG_ENABLED := false
+global DEBUG_ENABLED := true
 global D_UI         := A_ScriptDir "\ui"
 
 global g_Settings       := Map()
@@ -54,6 +54,7 @@ global g_LaunchGracePids := Map()       ; pid -> expiry tick for freshly launche
 global g_LaunchGraceSpecs := Map()      ; exe -> {expires,before:Set(hwnd)}
 global g_RestoreContext := 0
 global g_RestorePersistPending := 0
+global g_RestoreInProgress := false
 global g_EdgePid        := 0
 global g_HttpPort       := 0
 global g_HttpSock       := 0
@@ -674,85 +675,116 @@ WorkspaceSnapshot(id) {
 }
 
 WorkspaceRestore(id) {
-    global g_HwndCache, g_ActiveWs, g_Settings, g_History, g_RestoreContext, g_LaunchGracePids, g_LaunchGraceSpecs
-    ws := WorkspaceFind(id)
-    if !ws
+    global g_HwndCache, g_ActiveWs, g_Settings, g_History, g_RestoreContext, g_LaunchGracePids, g_LaunchGraceSpecs, g_RestoreInProgress
+    if g_RestoreInProgress {
+        DebugLog("restore skipped reentry id='" id "'")
         return false
-    LaunchGracePruneExpired()
-    ; Push to history for undo
-    g_History.Push(g_ActiveWs)
-    if g_History.Length > 10
-        g_History.RemoveAt(1)
-
-    list := ws["windows"]
-    cache := g_HwndCache.Has(id) ? g_HwndCache[id] : []
-    g_RestoreContext := BuildRestoreContext(list)
-
-    ; Build exclude set: hwnds owned by OTHER workspaces' caches (live ones
-    ; only). Prevents stealing a window that belongs to another workspace
-    ; just because fingerprint (class+exe) happens to match.
-    excludeSet := BuildExcludeSet(id)
-
-    moved := 0, launched := 0
-    missing := []
-    appliedHwnds := []
-    appliedSet := Map()
-    Loop list.Length {
-        info := list[A_Index]
-        info := ApplyPerAppRules(info)
-        hint := A_Index <= cache.Length ? cache[A_Index] : 0
-        target := WindowResolve(info, hint, excludeSet)
-        if target {
-            if WindowReposition(target, info)
-                moved++
-            if A_Index <= cache.Length
-                cache[A_Index] := target
-            PushUniqueHwnd(appliedHwnds, appliedSet, target)
-            ; Prevent the same hwnd from being assigned to multiple slots
-            excludeSet[target] := true
-        } else {
-            missing.Push(Map("info", info, "idx", A_Index))
-        }
     }
-    g_HwndCache[id] := cache
+    g_RestoreInProgress := true
+    restoreStart := A_TickCount
+    try {
+        ws := WorkspaceFind(id)
+        if !ws
+            return false
+        LaunchGracePruneExpired()
+        ; Push to history for undo
+        g_History.Push(g_ActiveWs)
+        if g_History.Length > 10
+            g_History.RemoveAt(1)
 
-    ; Prompt to launch missing windows.
-    if missing.Length > 0 && PromptLaunchMissing(missing) {
-        pending := []
-        for item in missing {
-            info := item["info"]
-            idx := item["idx"]
-            DebugLog("launch missing exe=" info["exe"] " title='" info["title"] "' folder='" info["folder"] "' url='" info["url"] "'")
-            pid := WindowLaunch(info, id)
-            launched++
-            hwnd := 0
-            if pid {
-                for candidate in WinGetList("ahk_pid " pid) {
-                    if !WindowIsManageable(candidate)
-                        continue
-                    if WindowMatchesBlacklist(candidate)
-                        continue
-                    if WindowMatchesSticky(candidate)
-                        continue
-                    hwnd := candidate
-                    break
+        list := ws["windows"]
+        cache := g_HwndCache.Has(id) ? g_HwndCache[id] : []
+        g_RestoreContext := BuildRestoreContext(list)
+        DebugLog("restore ctx workspace='" ws["name"] "' windows=" list.Length " ms=" (A_TickCount - restoreStart))
+
+        ; Build exclude set: hwnds owned by OTHER workspaces' caches (live ones
+        ; only). Prevents stealing a window that belongs to another workspace
+        ; just because fingerprint (class+exe) happens to match.
+        excludeSet := BuildExcludeSet(id)
+
+        moved := 0, launched := 0
+        missing := []
+        appliedHwnds := []
+        appliedSet := Map()
+        Loop list.Length {
+            slotIdx := A_Index
+            itemStart := A_TickCount
+            info := list[slotIdx]
+            DebugLog("restore item begin idx=" slotIdx " exe='" info.Get("exe", "") "' title='" info.Get("title", "") "'")
+            info := ApplyPerAppRules(info)
+            hint := slotIdx <= cache.Length ? cache[slotIdx] : 0
+            DebugLog("restore item before resolve idx=" slotIdx " hint=" hint)
+            target := WindowResolve(info, hint, excludeSet)
+            DebugLog("restore item after resolve idx=" slotIdx " target=" target " resolveMs=" (A_TickCount - itemStart))
+            if target {
+                moveStart := A_TickCount
+                if WindowReposition(target, info)
+                    moved++
+                DebugLog("restore item after move idx=" slotIdx " hwnd=" target " moveMs=" (A_TickCount - moveStart))
+                try {
+                    DebugLog("restore item cache-write begin idx=" slotIdx " cacheType=" Type(cache) " cacheLen=" cache.Length)
+                    while (cache.Length < slotIdx)
+                        cache.Push(0)
+                    cache[slotIdx] := target
+                    DebugLog("restore item cache-write done idx=" slotIdx " cacheLen=" cache.Length)
+                    PushUniqueHwnd(appliedHwnds, appliedSet, target)
+                    DebugLog("restore item push-unique done idx=" slotIdx)
+                    ; Prevent the same hwnd from being assigned to multiple slots
+                    excludeSet[target] := true
+                    DebugLog("restore item exclude-set done idx=" slotIdx)
+                } catch as e {
+                    DebugLog("restore item post-move error idx=" slotIdx " line=" e.Line " msg='" e.Message "' what='" e.What "'")
+                    return false
                 }
+            } else {
+                missing.Push(Map("info", info, "idx", slotIdx))
             }
-            if !hwnd && info.Has("exe") && info["exe"] != ""
-                hwnd := FindNewWindowFromLaunchBaseline(info["exe"], excludeSet)
-            if hwnd {
-                if idx <= cache.Length
+            if (info.Has("exe") && info["exe"] = "firefox.exe")
+                DebugLog("restore item firefox idx=" slotIdx " matched=" (target ? 1 : 0) " ms=" (A_TickCount - itemStart) " title='" info["title"] "'")
+        }
+        DebugLog("restore before hwnd-cache save workspace='" ws["name"] "'")
+        g_HwndCache[id] := cache
+        DebugLog("restore after hwnd-cache save workspace='" ws["name"] "'")
+        DebugLog("restore after loop workspace='" ws["name"] "' moved=" moved " missing=" missing.Length)
+
+        ; Prompt to launch missing windows.
+        if missing.Length > 0 && PromptLaunchMissing(missing) {
+            pending := []
+            for item in missing {
+                info := item["info"]
+                idx := item["idx"]
+                DebugLog("launch missing exe=" info["exe"] " title='" info["title"] "' folder='" info["folder"] "' url='" info["url"] "'")
+                pid := WindowLaunch(info, id)
+                launched++
+                hwnd := 0
+                if pid {
+                    for candidate in WinGetList("ahk_pid " pid) {
+                        if !WindowIsManageable(candidate)
+                            continue
+                        if WindowMatchesBlacklist(candidate)
+                            continue
+                        if WindowMatchesSticky(candidate)
+                            continue
+                        hwnd := candidate
+                        break
+                    }
+                }
+                if !hwnd && info.Has("exe") && info["exe"] != ""
+                    hwnd := FindNewWindowFromLaunchBaseline(info["exe"], excludeSet)
+                if hwnd {
+                    while (cache.Length < idx)
+                        cache.Push(0)
                     cache[idx] := hwnd
-                PushUniqueHwnd(appliedHwnds, appliedSet, hwnd)
-                excludeSet[hwnd] := true
+                    PushUniqueHwnd(appliedHwnds, appliedSet, hwnd)
+                    excludeSet[hwnd] := true
+                }
+                pending.Push(Map("info", info, "idx", idx, "pid", pid, "hwnd", hwnd))
             }
-            pending.Push(Map("info", info, "idx", idx, "pid", pid, "hwnd", hwnd))
+            if pending.Length > 0 {
+                SetTimer(((p, wid) => (*) => PostLaunchPosition(wid, p))(pending, id), -2200)
+                SetTimer(((p, wid) => (*) => PostLaunchPosition(wid, p))(pending, id), -9000)
+            }
         }
-        if pending.Length > 0 {
-            SetTimer(((p, wid) => (*) => PostLaunchPosition(wid, p))(pending, id), -2200)
-            SetTimer(((p, wid) => (*) => PostLaunchPosition(wid, p))(pending, id), -9000)
-        }
-    }
 
     ; 对严格匹配应用（如 VSCode/浏览器），即使当前没有精确命中，
     ; 也先把同 exe 的现存窗口保留下来，避免 focus mode 把它们最小化。
@@ -789,15 +821,26 @@ WorkspaceRestore(id) {
         }
     }
 
-    g_ActiveWs := id
-    QueueRestorePersistence()
-    TrayBadgeUpdate()
-    if g_Settings["switchToast"]
-        ToastShow(ws["icon"] " " ws["name"])
-    if g_Settings["focusMode"]
-        FocusModeApply(appliedHwnds)
-    g_RestoreContext := 0
-    return true
+        g_ActiveWs := id
+        DebugLog("restore before persist workspace='" ws["name"] "'")
+        QueueRestorePersistence()
+        DebugLog("restore after persist queue workspace='" ws["name"] "'")
+        TrayBadgeUpdate()
+        DebugLog("restore after tray workspace='" ws["name"] "'")
+        if g_Settings["switchToast"]
+            ToastShow(ws["icon"] " " ws["name"])
+        DebugLog("restore after toast workspace='" ws["name"] "'")
+        if g_Settings["focusMode"] {
+            DebugLog("restore before focus workspace='" ws["name"] "'")
+            FocusModeApply(appliedHwnds)
+            DebugLog("restore after focus workspace='" ws["name"] "'")
+        }
+        DebugLog("restore done workspace='" ws["name"] "' moved=" moved " missing=" missing.Length " launched=" launched " totalMs=" (A_TickCount - restoreStart))
+        return true
+    } finally {
+        g_RestoreContext := 0
+        g_RestoreInProgress := false
+    }
 }
 
 BuildRestoreContext(list) {
@@ -939,9 +982,12 @@ PostLaunchPosition(id, pending) {
             }
         }
         if hwnd {
+            if (info.Has("exe") && info["exe"] = "firefox.exe" && (!item.Has("tabsPopulated") || !item["tabsPopulated"]))
+                item["tabsPopulated"] := FirefoxPopulateExtraTabs(hwnd, info)
             WindowReposition(hwnd, info)
-            if idx <= cache.Length
-                cache[idx] := hwnd
+            while (cache.Length < idx)
+                cache.Push(0)
+            cache[idx] := hwnd
             PushUniqueHwnd(appliedHwnds, appliedSet, hwnd)
             excludeSet[hwnd] := true
         }
@@ -1471,7 +1517,12 @@ FirefoxWindowStateFromSession(win) {
     if (selected < 1 || selected > tabs.Length)
         selected := 1
     active := tabs[selected]
-    return Map("tabs", tabs, "activeUrl", active["url"], "activeTitle", active["title"])
+    urlSet := Map()
+    for tab in tabs {
+        if (tab is Map) && tab.Has("url") && tab["url"] != ""
+            urlSet[tab["url"]] := true
+    }
+    return Map("tabs", tabs, "activeUrl", active["url"], "activeTitle", active["title"], "urlSet", urlSet)
 }
 
 FirefoxScoreSessionWindow(state, wantedTitle) {
@@ -1507,13 +1558,16 @@ FirefoxExtractWindowState(sessionFile, windowTitle := "") {
 
 FirefoxExtractAllWindowStates(sessionFile) {
     static cache := Map()
+    startTick := A_TickCount
     if (sessionFile = "" || !FileExist(sessionFile))
         return ""
     stamp := FileGetTime(sessionFile, "M")
     if cache.Has(sessionFile) {
         entry := cache[sessionFile]
-        if (entry["stamp"] = stamp)
+        if (entry["stamp"] = stamp) {
+            DebugLog("firefox states cache-hit count=" entry["states"].Length " ms=" (A_TickCount - startTick))
             return entry["states"]
+        }
     }
     raw := FirefoxReadSessionRaw(sessionFile)
     if (raw = "")
@@ -1528,6 +1582,7 @@ FirefoxExtractAllWindowStates(sessionFile) {
             states.Push(state)
     }
     cache[sessionFile] := Map("stamp", stamp, "states", states)
+    DebugLog("firefox states parsed count=" states.Length " ms=" (A_TickCount - startTick) " file='" sessionFile "'")
     return states
 }
 
@@ -1573,34 +1628,50 @@ FirefoxUrlsForLaunch(info) {
 
 FirefoxTabsSupersetMatch(hwnd, info) {
     global g_RestoreContext
+    matchStart := A_TickCount
     if !(info is Map)
         return false
     wanted := FirefoxUrlsForLaunch(info)
     if (wanted.Length = 0)
         return false
-    state := ""
+    states := []
     if (g_RestoreContext && g_RestoreContext.Has("firefoxStates") && (g_RestoreContext["firefoxStates"] is Array) && g_RestoreContext["firefoxStates"].Length > 0) {
-        liveTitle := RestoreContextTitle(hwnd)
-        state := FirefoxSelectBestWindowState(g_RestoreContext["firefoxStates"], liveTitle)
+        states := g_RestoreContext["firefoxStates"]
     } else {
         sessionFile := info.Has("firefoxSession") ? info["firefoxSession"] : ""
         if (sessionFile = "")
             sessionFile := FirefoxSessionFile()
         if (sessionFile = "")
             return false
-        liveTitle := RestoreContextTitle(hwnd)
-        state := FirefoxExtractWindowState(sessionFile, liveTitle)
+        states := FirefoxExtractAllWindowStates(sessionFile)
     }
-    if !(state is Map) || !state.Has("tabs")
+    if !(states is Array) || states.Length = 0
         return false
-    have := Map()
-    for u in FirefoxTabUrls(state["tabs"]) 
-        have[u] := true
-    for u in wanted {
-        if !have.Has(u)
-            return false
+    liveTitle := RestoreContextTitle(hwnd)
+    bestScore := -1
+    checked := 0
+    for state in states {
+        if !(state is Map)
+            continue
+        checked += 1
+        have := state.Has("urlSet") ? state["urlSet"] : Map()
+        ok := true
+        for u in wanted {
+            if !have.Has(u) {
+                ok := false
+                break
+            }
+        }
+        if !ok
+            continue
+        score := FirefoxScoreSessionWindow(state, FirefoxWindowTitleBase(liveTitle))
+        if (info.Has("title") && info["title"] != "")
+            score += FirefoxScoreSessionWindow(state, FirefoxWindowTitleBase(info["title"]))
+        if (score > bestScore)
+            bestScore := score
     }
-    return true
+    DebugLog("firefox match hwnd=" hwnd " wanted=" wanted.Length " states=" checked " matched=" (bestScore >= 0 ? 1 : 0) " ms=" (A_TickCount - matchStart) " liveTitle='" liveTitle "'")
+    return bestScore >= 0
 }
 
 FirefoxTabUrls(tabs) {
@@ -1777,17 +1848,42 @@ FirefoxLaunchCommand(info) {
     exePath := info.Has("path") && info["path"] != "" ? info["path"] : "firefox.exe"
     profilePath := info.Has("firefoxProfilePath") ? info["firefoxProfilePath"] : ""
     urls := FirefoxUrlsForLaunch(info)
-    cmd := '"' exePath '" -new-instance'
-    if (profilePath != "")
-        cmd .= ' -profile "' profilePath '"'
-    if (urls.Length = 0)
-        return cmd
-    cmd .= ' -new-window "' urls[1] '"'
-    if (urls.Length > 1) {
-        Loop urls.Length - 1
-            cmd .= ' -new-tab "' urls[A_Index + 1] '"'
+    running := ProcessExist("firefox.exe")
+    cmd := '"' exePath '"'
+    if !running {
+        cmd .= ' -new-instance'
+        if (profilePath != "")
+            cmd .= ' -profile "' profilePath '"'
     }
+    if (urls.Length = 0)
+        return running ? (cmd ' -new-window about:blank') : cmd
+    cmd .= ' -new-window "' urls[1] '"'
     return cmd
+}
+
+FirefoxPopulateExtraTabs(hwnd, info) {
+    urls := FirefoxUrlsForLaunch(info)
+    if (urls.Length <= 1)
+        return true
+    exePath := info.Has("path") && info["path"] != "" ? info["path"] : "firefox.exe"
+    try {
+        if hwnd {
+            WinActivate "ahk_id " hwnd
+            WinWaitActive "ahk_id " hwnd, , 1
+        }
+    }
+    Loop urls.Length - 1 {
+        url := urls[A_Index + 1]
+        try {
+            Run '"' exePath '" -new-tab "' url '"'
+            Sleep 120
+        } catch as e {
+            DebugLog("firefox extra-tab error url='" url "' msg='" e.Message "'")
+            return false
+        }
+    }
+    DebugLog("firefox extra-tabs hwnd=" hwnd " added=" (urls.Length - 1))
+    return true
 }
 
 ; 从 VSCode 窗口标题提取工作区/文件夹路径
@@ -1895,6 +1991,9 @@ WindowCapture(hwnd) {
 }
 
 WindowResolve(info, hint, excludeSet := 0) {
+    startTick := A_TickCount
+    if (info.Has("exe") && info["exe"] = "firefox.exe")
+        DebugLog("resolve enter firefox hint=" hint " exclude=" (excludeSet ? excludeSet.Count : 0))
     if hint {
         try {
             if WinExist("ahk_id " hint) && !WindowMatchesSticky(hint) {
@@ -1907,8 +2006,12 @@ WindowResolve(info, hint, excludeSet := 0) {
     if (info["exe"] = "Code.exe" || info["exe"] = "msedge.exe" || info["exe"] = "firefox.exe" || info["exe"] = "chrome.exe")
         DebugLog("resolve fingerprint exe=" info["exe"] " title='" info["title"] "' folder='" info["folder"] "' uri='" (info.Has("vscodeUri") ? info["vscodeUri"] : "") "' url='" info["url"] "'")
     hwnd := WindowFindByFingerprint(info, excludeSet)
+    if (info.Has("exe") && info["exe"] = "firefox.exe")
+        DebugLog("resolve fingerprint done hwnd=" hwnd " ms=" (A_TickCount - startTick))
     if !hwnd && info.Has("exe") && info["exe"] = "firefox.exe"
         hwnd := FindNewWindowFromLaunchBaseline("firefox.exe", excludeSet)
+    if (info.Has("exe") && info["exe"] = "firefox.exe")
+        DebugLog("resolve exit firefox hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
     return hwnd
 }
 
@@ -1961,16 +2064,21 @@ WindowFindByFingerprint(info, excludeSet := 0) {
 
     ; --- Firefox: 按标签页集合包含关系匹配 ---
     if (info["exe"] = "firefox.exe") {
+        ffStart := A_TickCount
+        candidateCount := 0
         for hwnd in RestoreContextExeWindows("firefox.exe") {
+            candidateCount += 1
             if skipExcluded(hwnd)
                 continue
             if !safeHwnd(hwnd)
                 continue
+            DebugLog("firefox candidate hwnd=" hwnd " idx=" candidateCount)
             if FirefoxTabsSupersetMatch(hwnd, info) {
                 DebugLog("match firefox tabs hwnd=" hwnd " title='" WinGetTitle("ahk_id " hwnd) "'")
                 return hwnd
             }
         }
+        DebugLog("firefox candidates done count=" candidateCount " ms=" (A_TickCount - ffStart))
     }
 
     ; --- 浏览器: 按 URL 精确匹配 ---
@@ -2205,6 +2313,7 @@ FindNewWindowFromLaunchBaseline(exe, excludeSet := 0) {
 
 WindowReposition(hwnd, info) {
     try {
+        startTick := A_TickCount
         x := info["x"], y := info["y"], w := info["w"], h := info["h"]
         state := info["state"]
         if !PosOnAnyMonitor(x, y, w, h) {
@@ -2214,6 +2323,7 @@ WindowReposition(hwnd, info) {
             h := Min(h, b - t - 160)
         }
         curState := WinGetMinMax("ahk_id " hwnd)
+        DebugLog("reposition enter hwnd=" hwnd " exe='" info.Get("exe", "") "' state=" state " curState=" curState)
         ; Already in target minimized state — no work, no flicker.
         if (state = -1 && curState = -1)
             return true
@@ -2231,13 +2341,16 @@ WindowReposition(hwnd, info) {
         if (curState != 0)
             WinRestore "ahk_id " hwnd
         WinMove x, y, w, h, "ahk_id " hwnd
+        DebugLog("reposition after move hwnd=" hwnd " ms=" (A_TickCount - startTick))
         if (state = 1) {
             WinMaximize "ahk_id " hwnd
             if (WinGetMinMax("ahk_id " hwnd) != 1)
                 SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, x, y, w, h), -350)
         }
+        DebugLog("reposition exit hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
         return true
     } catch {
+        DebugLog("reposition error hwnd=" hwnd)
         return false
     }
 }
