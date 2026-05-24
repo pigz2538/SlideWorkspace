@@ -2339,6 +2339,7 @@ WindowReposition(hwnd, info) {
             h := Min(h, b - t - 160)
         }
         curState := WinGetMinMax("ahk_id " hwnd)
+        prevState := curState
         DebugLog("reposition enter hwnd=" hwnd " exe='" info.Get("exe", "") "' state=" state " curState=" curState)
         ; Already in target minimized state — no work, no flicker.
         if (state = -1 && curState = -1)
@@ -2361,6 +2362,11 @@ WindowReposition(hwnd, info) {
         if (curState != 0)
             WinRestore "ahk_id " hwnd
         if (state = 1) {
+            restoredState := WinGetMinMax("ahk_id " hwnd)
+            if (prevState != 0 && restoredState != 0) {
+                DebugLog("reposition restore-preserved-max hwnd=" hwnd " prev=" prevState " now=" restoredState)
+                return true
+            }
             if (WindowIsEffectivelyMaximized(hwnd, targetMonitor)) {
                 DebugLog("reposition restore-kept-maximized hwnd=" hwnd)
                 return true
