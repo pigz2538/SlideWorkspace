@@ -430,6 +430,10 @@ NormalizeWorkspaces() {
     intFields := ["x", "y", "w", "h", "state", "monitor"]
     migrated := 0
     for ws in g_Workspaces {
+        if !ws.Has("enabled") {
+            ws["enabled"] := 1
+            migrated++
+        }
         if !ws.Has("windows") || !(ws["windows"] is Array)
             continue
         for win in ws["windows"] {
@@ -631,6 +635,7 @@ NewWorkspace(name := "") {
     w := Map()
     w["id"] := NewWorkspaceId()
     w["name"] := EnsureUniqueName(name = "" ? "Workspace" : name)
+    w["enabled"] := 1
     w["hotkey"] := ""
     w["saveHotkey"] := ""
     w["icon"] := "📋"
@@ -686,6 +691,10 @@ WorkspaceRestore(id) {
         ws := WorkspaceFind(id)
         if !ws
             return false
+        if (ws.Has("enabled") && !ws["enabled"]) {
+            DebugLog("restore skipped disabled id='" id "'")
+            return false
+        }
         LaunchGracePruneExpired()
         ; Push to history for undo
         g_History.Push(g_ActiveWs)
@@ -951,10 +960,14 @@ PushUniqueHwnd(list, set, hwnd) {
 }
 
 PostLaunchPosition(id, pending) {
-    global g_HwndCache, g_LaunchGraceSpecs
+    global g_HwndCache, g_LaunchGraceSpecs, g_ActiveWs
     ws := WorkspaceFind(id)
     if !ws
         return
+    if (g_ActiveWs != id) {
+        DebugLog("post-launch skipped inactive id='" id "' active='" g_ActiveWs "'")
+        return
+    }
     cache := g_HwndCache.Has(id) ? g_HwndCache[id] : []
     excludeSet := BuildExcludeSet(id)
     appliedHwnds := []
@@ -2316,6 +2329,9 @@ WindowReposition(hwnd, info) {
         startTick := A_TickCount
         x := info["x"], y := info["y"], w := info["w"], h := info["h"]
         state := info["state"]
+        targetMonitor := info.Has("monitor") ? info["monitor"] : 1
+        if (targetMonitor < 1 || targetMonitor > MonitorGetCount())
+            targetMonitor := 1
         if !PosOnAnyMonitor(x, y, w, h) {
             MonitorGetWorkArea 1, &l, &t, &r, &b
             x := l + 80, y := t + 80
@@ -2327,6 +2343,10 @@ WindowReposition(hwnd, info) {
         ; Already in target minimized state — no work, no flicker.
         if (state = -1 && curState = -1)
             return true
+        if (state = 1 && WindowIsEffectivelyMaximized(hwnd, targetMonitor)) {
+            DebugLog("reposition keep-maximized hwnd=" hwnd)
+            return true
+        }
         ; If target is minimized but window is currently shown, set normal
         ; position first via SetWindowPos (no visible move), then minimize.
         if (state = -1) {
@@ -2340,13 +2360,35 @@ WindowReposition(hwnd, info) {
         ; Restore first if currently min/max so WinMove can size correctly
         if (curState != 0)
             WinRestore "ahk_id " hwnd
+        if (state = 1) {
+            if (WindowIsEffectivelyMaximized(hwnd, targetMonitor)) {
+                DebugLog("reposition restore-kept-maximized hwnd=" hwnd)
+                return true
+            }
+            WinGetPos &cx, &cy, &cw, &ch, "ahk_id " hwnd
+            currentMonitor := MonitorAtPoint(cx + cw//2, cy + ch//2)
+            if (currentMonitor = targetMonitor) {
+                DebugLog("reposition maximize-in-place hwnd=" hwnd " monitor=" targetMonitor)
+                WinMaximize "ahk_id " hwnd
+                if (WindowIsEffectivelyMaximized(hwnd, targetMonitor))
+                    return true
+            }
+            MonitorGetWorkArea targetMonitor, &ml, &mt, &mr, &mb
+            normalW := Min(Max(400, (mr - ml) - 160), mr - ml)
+            normalH := Min(Max(300, (mb - mt) - 160), mb - mt)
+            normalX := ml + Max(0, ((mr - ml) - normalW) // 2)
+            normalY := mt + Max(0, ((mb - mt) - normalH) // 2)
+            WinMove normalX, normalY, normalW, normalH, "ahk_id " hwnd
+            DebugLog("reposition before maximize hwnd=" hwnd " monitor=" targetMonitor)
+            WinMaximize "ahk_id " hwnd
+            SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, normalX, normalY, normalW, normalH), -180)
+            SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, normalX, normalY, normalW, normalH), -600)
+            SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, normalX, normalY, normalW, normalH), -1400)
+            DebugLog("reposition exit hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
+            return true
+        }
         WinMove x, y, w, h, "ahk_id " hwnd
         DebugLog("reposition after move hwnd=" hwnd " ms=" (A_TickCount - startTick))
-        if (state = 1) {
-            WinMaximize "ahk_id " hwnd
-            if (WinGetMinMax("ahk_id " hwnd) != 1)
-                SetTimer(((_hwnd, _x, _y, _w, _h) => (*) => WindowRetryMaximize(_hwnd, _x, _y, _w, _h))(hwnd, x, y, w, h), -350)
-        }
         DebugLog("reposition exit hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
         return true
     } catch {
@@ -2359,11 +2401,43 @@ WindowRetryMaximize(hwnd, x, y, w, h) {
     try {
         if !WinExist("ahk_id " hwnd)
             return
-        if (WinGetMinMax("ahk_id " hwnd) = 1)
+        targetMonitor := MonitorAtPoint(x + w//2, y + h//2)
+        if WindowIsEffectivelyMaximized(hwnd, targetMonitor)
+            return
+        minmax := WinGetMinMax("ahk_id " hwnd)
+        if (minmax = -1)
+            WinRestore "ahk_id " hwnd
+        WinMaximize "ahk_id " hwnd
+        if WindowIsEffectivelyMaximized(hwnd, targetMonitor)
             return
         WinRestore "ahk_id " hwnd
         WinMove x, y, w, h, "ahk_id " hwnd
         WinMaximize "ahk_id " hwnd
+        DebugLog("retry maximize hwnd=" hwnd " state=" WinGetMinMax("ahk_id " hwnd) " eff=" WindowIsEffectivelyMaximized(hwnd, targetMonitor))
+    }
+}
+
+WindowIsEffectivelyMaximized(hwnd, targetMonitor := 0) {
+    try {
+        if DllCall("user32\IsZoomed", "ptr", hwnd)
+            return true
+        WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
+        if (w <= 0 || h <= 0)
+            return false
+        if !targetMonitor
+            targetMonitor := MonitorAtPoint(x + w//2, y + h//2)
+        if (targetMonitor < 1 || targetMonitor > MonitorGetCount())
+            return false
+        MonitorGetWorkArea targetMonitor, &ml, &mt, &mr, &mb
+        workW := mr - ml
+        workH := mb - mt
+        tol := 24
+        return Abs(x - ml) <= tol
+            && Abs(y - mt) <= tol
+            && Abs(w - workW) <= (tol * 2)
+            && Abs(h - workH) <= (tol * 2)
+    } catch {
+        return false
     }
 }
 
@@ -2776,13 +2850,26 @@ ActionWorkspacePage(delta) {
     n := g_Workspaces.Length
     if (n = 0)
         return
-    curIdx := 0
-    if (g_ActiveWs != "")
-        curIdx := WorkspaceIndex(g_ActiveWs)
-    if (curIdx = 0)
-        curIdx := delta > 0 ? 0 : 1
-    newIdx := Mod(curIdx - 1 + delta + n, n) + 1
-    WorkspaceRestore(g_Workspaces[newIdx]["id"])
+    enabledIdx := []
+    for i, ws in g_Workspaces {
+        if !ws.Has("enabled") || ws["enabled"]
+            enabledIdx.Push(i)
+    }
+    if (enabledIdx.Length = 0)
+        return
+    curPos := 0
+    if (g_ActiveWs != "") {
+        for pos, idx in enabledIdx {
+            if (g_Workspaces[idx]["id"] = g_ActiveWs) {
+                curPos := pos
+                break
+            }
+        }
+    }
+    if (curPos = 0)
+        curPos := delta > 0 ? 0 : 1
+    newPos := Mod(curPos - 1 + delta + enabledIdx.Length, enabledIdx.Length) + 1
+    WorkspaceRestore(g_Workspaces[enabledIdx[newPos]]["id"])
 }
 
 ;==============================================================

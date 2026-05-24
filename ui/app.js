@@ -70,6 +70,7 @@ const I18N = {
     'ws.iconTitle': '点击更换图标',
     'ws.snapshot': '把当前所有窗口存到这个工作区',
     'ws.restore': '应用这个工作区',
+    'ws.enabled': '允许切换到这个工作区',
     'ws.delete': '删除这个工作区',
     'ws.removeWin': '从工作区移除',
     'ws.chipRestore': '恢复',
@@ -156,6 +157,7 @@ const I18N = {
     'ws.iconTitle': 'Click to change icon',
     'ws.snapshot': 'Snapshot current windows into this workspace',
     'ws.restore': 'Restore this workspace',
+    'ws.enabled': 'Allow switching to this workspace',
     'ws.delete': 'Delete this workspace',
     'ws.removeWin': 'Remove from workspace',
     'ws.chipRestore': 'Restore',
@@ -262,7 +264,7 @@ function renderGrid() {
 
 function renderWorkspaceCard(ws, idx) {
   const card = el('article', {
-    class: 'ws-card' + (state.active === ws.id ? ' active' : ''),
+    class: 'ws-card' + (state.active === ws.id ? ' active' : '') + ((ws.enabled ?? 1) ? '' : ' disabled'),
     'data-ws-id': ws.id,
     ondragenter: (e) => { if (dragInfo) { e.preventDefault(); } },
     ondragover: (e) => onCardDragOver(e, card),
@@ -273,6 +275,13 @@ function renderWorkspaceCard(ws, idx) {
   const head = el('div', { class: 'ws-head' });
 
   const titleRow = el('div', { class: 'ws-title-row' });
+  const enabled = el('input', {
+    class: 'ws-enabled-toggle',
+    type: 'checkbox',
+    checked: !!(ws.enabled ?? 1),
+    title: t('ws.enabled'),
+    onchange: (e) => updateWorkspace(ws.id, { enabled: e.target.checked ? 1 : 0 }),
+  });
   const icon = el('span', {
     class: 'ws-icon',
     title: t('ws.iconTitle'),
@@ -292,6 +301,7 @@ function renderWorkspaceCard(ws, idx) {
   }, '📸'));
   actions.appendChild(el('button', {
     title: t('ws.restore'),
+    disabled: !(ws.enabled ?? 1),
     onclick: () => restoreWorkspace(ws.id),
   }, '↻'));
   actions.appendChild(el('button', {
@@ -300,7 +310,7 @@ function renderWorkspaceCard(ws, idx) {
     onclick: () => deleteWorkspace(ws.id),
   }, '✕'));
 
-  titleRow.append(icon, name, actions);
+  titleRow.append(enabled, icon, name, actions);
   head.append(titleRow);
 
   const hkRow = el('div', { class: 'ws-hotkeys' });

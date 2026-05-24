@@ -116,6 +116,9 @@ button {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent), var(--shadow);
 }
+.ws-card.disabled {
+  opacity: 0.58;
+}
 .ws-card.dragover {
   border-color: var(--ok);
   background: rgba(74, 222, 128, 0.05);
@@ -135,6 +138,11 @@ button {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+.ws-enabled-toggle {
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: 0 0 auto;
 }
 .ws-icon {
   font-size: 18px;
