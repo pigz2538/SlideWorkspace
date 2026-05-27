@@ -676,7 +676,7 @@ WorkspaceSnapshot(id) {
     ws["windows"] := list
     g_HwndCache[id] := cache
     WorkspacesSave()
-    return true
+    return ws
 }
 
 WorkspaceRestore(id) {
@@ -924,12 +924,6 @@ RestoreContextIndexPush(index, key, hwnd) {
     index[key].Push(hwnd)
 }
 
-RestoreContextGetIndex(ctx, indexName, key) {
-    if (ctx && ctx.Has(indexName) && ctx[indexName].Has(key))
-        return ctx[indexName][key]
-    return []
-}
-
 RestoreContextGet(indexName, key) {
     global g_RestoreContext
     if (g_RestoreContext && g_RestoreContext.Has(indexName) && g_RestoreContext[indexName].Has(key))
@@ -1086,7 +1080,7 @@ FocusModeApply(keepHwnds) {
             continue
         try {
             pid := WinGetPID("ahk_id " hwnd)
-            if WinGetPID("ahk_id " hwnd) = selfPid
+            if pid = selfPid
                 continue
             if g_LaunchGracePids.Has(pid) && LaunchGraceOwnsActiveWorkspaceByPid(pid)
                 continue
@@ -1978,22 +1972,16 @@ WindowCapture(hwnd) {
             info["vscodeUri"] := ResolveVscodeFolderUri(title)
             DebugLog("capture vscode hwnd=" hwnd " title='" title "' folder='" info["folder"] "' uri='" info["vscodeUri"] "'")
         }
-        ; 浏览器 URL 记录（Edge/Firefox）
-        if (exe = "msedge.exe" || exe = "firefox.exe" || exe = "chrome.exe") {
+        ; Firefox session handling (reads URLs from sessionstore)
+        if (exe = "firefox.exe") {
             try {
-                url := WindowBrowserUrl(hwnd)
-                if url
-                    info["url"] := url
-                if (exe = "firefox.exe") {
-                    sessionFile := FirefoxSessionFile()
-                    if (sessionFile != "") {
-                        info["firefoxSession"] := sessionFile
-                        info["firefoxProfile"] := FirefoxProfileNameFromSessionFile(sessionFile)
-                        info["firefoxProfilePath"] := FirefoxProfilePathFromSessionFile(sessionFile)
-                        FirefoxEnsureSessionData(&info)
-                    }
+                sessionFile := FirefoxSessionFile()
+                if (sessionFile != "") {
+                    info["firefoxSession"] := sessionFile
+                    info["firefoxProfile"] := FirefoxProfileNameFromSessionFile(sessionFile)
+                    info["firefoxProfilePath"] := FirefoxProfilePathFromSessionFile(sessionFile)
+                    FirefoxEnsureSessionData(&info)
                 }
-                DebugLog("capture browser hwnd=" hwnd " exe=" exe " title='" title "' url='" info["url"] "'")
             }
         }
         if (g_Settings.Get("captureThumbnails", 1) && state != -1)
@@ -2093,22 +2081,6 @@ WindowFindByFingerprint(info, excludeSet := 0) {
             }
         }
         DebugLog("firefox candidates done count=" candidateCount " ms=" (A_TickCount - ffStart))
-    }
-
-    ; --- 浏览器: 按 URL 精确匹配 ---
-    if (info["url"] != "" && info["exe"] != "firefox.exe") {
-        for hwnd in RestoreContextExeWindows(info["exe"]) {
-            if skipExcluded(hwnd)
-                continue
-            if !safeHwnd(hwnd)
-                continue
-            url := WindowBrowserUrl(hwnd)
-            if (url != "" && url = info["url"]) {
-                DebugLog("match browser hwnd=" hwnd " exe=" info["exe"] " url='" url "'")
-                return hwnd
-            }
-        }
-        DebugLog("match browser missed exe=" info["exe"] " wanted='" info["url"] "'")
     }
 
     ; ============================================================
@@ -2330,6 +2302,23 @@ WindowReposition(hwnd, info) {
         startTick := A_TickCount
         x := info["x"], y := info["y"], w := info["w"], h := info["h"]
         state := info["state"]
+        ; Adjust position to target monitor if the window drifted to another screen.
+        curMonitor := MonitorAtPoint(x + w//2, y + h//2)
+        targetMonitor := info.Has("monitor") ? Integer(info["monitor"] + "") : 1
+        if (curMonitor != targetMonitor) {
+            MonitorGet curMonitor, &cl, &ct, &cr, &cb
+            MonitorGet targetMonitor, &tl, &tt, &tr, &tb
+            if (tl || tt || tr || tb) {
+                x += (tl - cl)
+                y += (tt - ct)
+            } else {
+                ; Target monitor gone — fall back to primary
+                MonitorGetWorkArea 1, &fl, &ft, &fr, &fb
+                x := fl + 80, y := ft + 80
+                w := Min(w, fr - fl - 160)
+                h := Min(h, fb - ft - 160)
+            }
+        }
         if !PosOnAnyMonitor(x, y, w, h) {
             MonitorGetWorkArea 1, &l, &t, &r, &b
             x := l + 80, y := t + 80
@@ -2347,7 +2336,7 @@ WindowReposition(hwnd, info) {
             try DllCall("user32\SetWindowPos",
                 "ptr", hwnd, "ptr", 0,
                 "int", x, "int", y, "int", w, "int", h,
-                "uint", 0x0014 | 0x0010)  ; SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW
+                "uint", 0x0014 | 0x0010)  ; SWP_NOZORDER|SWP_NOACTIVATE
             WinMinimize "ahk_id " hwnd
             return true
         }
@@ -2464,14 +2453,6 @@ WindowExplorerPath(hwnd) {
             }
         }
     }
-    return ""
-}
-
-WindowBrowserUrl(hwnd) {
-    ; 这版先禁用不稳定的 ACC 抓取逻辑，避免运行期直接崩掉。
-    ; Firefox 的真实标签页恢复后续改为 session 文件方案实现。
-    ; Chromium/Firefox 当前拿不到可靠 URL 时返回空字符串即可。
-    DebugLog("browser-url skipped hwnd=" hwnd " title='" WinGetTitle("ahk_id " hwnd) "'")
     return ""
 }
 
@@ -3233,9 +3214,10 @@ ApiWorkspaceDelete(body, query, params) {
 
 ApiWorkspaceSnapshot(body, query, params) {
     id := params["id"]
-    if !WorkspaceSnapshot(id)
+    result := WorkspaceSnapshot(id)
+    if !result
         return {status: 404, contentType: "application/json", body: '{"error":"workspace not found"}'}
-    return WorkspaceFind(id)
+    return result
 }
 
 ApiWorkspaceRestore(body, query, params) {
