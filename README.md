@@ -325,7 +325,7 @@ Each workspace can also bind its **own** Restore and Save hotkeys via the chips 
 
 1. **Create a workspace** — top-right "+ Add workspace" or the trailing card, then name it (duplicates auto-suffix with `(2)`, `(3)`, etc.)
 2. **Snapshot** — arrange windows, click 📸; positions, sizes, monitors, states, folder paths, thumbnails, and app-specific restore metadata are captured (the manager UI's own window is excluded)
-3. **Restore** — click ↻; live windows snap into place via `SetWindowPlacement` (< 50ms, no flicker), missing apps prompt before relaunch and are then restored according to app type within 1–3 s
+3. **Restore** — click ↻; live windows return to their saved position, size, monitor, and min/max state, missing apps prompt before relaunch and are then restored according to app type within 1–3 s
 4. **Move/copy windows** — drag a window row to another card to move; hold `Ctrl` to copy
 5. **Mouse side-button paging** — press XButton1/XButton2 to cycle prev/next workspace
 6. **Bind hotkeys** — click any hotkey chip → press the combination → OK
@@ -418,6 +418,7 @@ Right-click tray → Exit, then delete the folder. No registry entries, no servi
 
 ## Version history
 
+- **v2.4** — Snapshot now stores each window's real restore rectangle (`WINDOWPLACEMENT.rcNormalPosition`) so moved/maximized/minimized windows restore correctly · empty monitor ids now fall back safely instead of aborting the whole restore
 - **v2.3** — VSCode local/SSH restore improvements · Firefox profile + tab session restore · thumbnail file GC and immediate delete · sticky-window cleanup · production cleanup of debug leftovers
 - **v2.2** — Mouse side-button workspace paging (XButton1/2) · Admin mode (`run-as-admin.bat`) · 1920×1080 JPEG thumbnails (was 240×160 PNG) · 6-tier hover preview size selector · Atomic `SetWindowPlacement` switching (no flicker) · No-flash focus mode transitions · Workspace name uniqueness · IME-aware auto-refresh · Recorder accepts middle / side / modifier+wheel · Self-healing data on load · JSON parser InStr fast path for long strings · Detailed drag-drop error reporting in footer
 - **v2.0** — Multi-workspace panel UI · Custom hotkeys (incl. mouse side buttons) · Drag-drop between workspaces (Ctrl=copy) · Window thumbnails · Focus mode · Tray badge · Switch toast · Per-app rules · Import/export · AHK core + HTTP server + Edge --app UI · Bilingual UI (中 / EN)

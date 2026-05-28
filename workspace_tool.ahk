@@ -1998,8 +1998,13 @@ WindowCapture(hwnd) {
         exe := WinGetProcessName("ahk_id " hwnd)
         path := ""
         try path := WinGetProcessPath("ahk_id " hwnd)
-        WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
         state := WinGetMinMax("ahk_id " hwnd)
+        placement := WindowGetPlacement(hwnd)
+        if (placement is Map) {
+            x := placement["x"], y := placement["y"], w := placement["w"], h := placement["h"]
+        } else {
+            WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
+        }
         info := Map(
             "title", title, "class", cls, "exe", exe, "path", path,
             "x", x, "y", y, "w", w, "h", h,
@@ -2425,7 +2430,12 @@ WindowReposition(hwnd, info) {
         state := info["state"]
         ; Adjust position to target monitor if the window drifted to another screen.
         curMonitor := MonitorAtPoint(x + w//2, y + h//2)
-        targetMonitor := info.Has("monitor") ? Integer(info["monitor"] + "") : 1
+        targetMonitor := 1
+        if info.Has("monitor") {
+            rawMonitor := info["monitor"]
+            if (rawMonitor != "")
+                targetMonitor := rawMonitor + 0
+        }
         if (curMonitor != targetMonitor) {
             MonitorGet curMonitor, &cl, &ct, &cr, &cb
             MonitorGet targetMonitor, &tl, &tt, &tr, &tb
@@ -2742,6 +2752,22 @@ PosOnAnyMonitor(x, y, w, h) {
 ;   UINT length, UINT flags, UINT showCmd,
 ;   POINT ptMinPosition, POINT ptMaxPosition,
 ;   RECT rcNormalPosition
+WindowGetPlacement(hwnd) {
+    wp := Buffer(44, 0)
+    NumPut("uint", 44, wp, 0)
+    if !DllCall("user32\GetWindowPlacement", "ptr", hwnd, "ptr", wp)
+        return 0
+    left := NumGet(wp, 28, "int")
+    top := NumGet(wp, 32, "int")
+    right := NumGet(wp, 36, "int")
+    bottom := NumGet(wp, 40, "int")
+    w := right - left
+    h := bottom - top
+    if (w <= 0 || h <= 0)
+        return 0
+    return Map("x", left, "y", top, "w", w, "h", h, "showCmd", NumGet(wp, 8, "uint"))
+}
+
 SetMaximizedOnMonitor(hwnd, targetMonitor, normalW, normalH) {
     static SW_SHOWMAXIMIZED := 3
     wp := Buffer(44, 0)
