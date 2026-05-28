@@ -2464,10 +2464,32 @@ WindowReposition(hwnd, info) {
         ; For maximized windows, do not move to saved/safe rectangles.
         ; Windows preserves maximized state across minimize/restore; if not,
         ; a single WinMaximize is enough. Moving first is what caused the
-        ; “maximized then shrinks to safe size” regression.
+        ; "maximized then shrinks to safe size" regression.
+        ; BUT: 如果用户在没最大化的时候把窗口拖到了别的显示器，光 WinMaximize
+        ; 会在它当前所在显示器最大化，跨屏还原就失效。所以先看实际所在显示器
+        ; 是否和目标一致，不一致时先 WinRestore + WinMove 到目标显示器再 Maximize。
         if (state = 1) {
             if (curState = -1)
                 WinRestore "ahk_id " hwnd
+            actualMonitor := 0
+            try {
+                WinGetPos &ax, &ay, &aw, &ah, "ahk_id " hwnd
+                actualMonitor := MonitorAtPoint(ax + aw // 2, ay + ah // 2)
+            }
+            if (actualMonitor != 0 && actualMonitor != targetMonitor) {
+                DebugLog("reposition cross-monitor maximize hwnd=" hwnd " from=" actualMonitor " to=" targetMonitor)
+                ; 当前是 max 状态先 Restore，否则 WinMove 不起作用
+                if (WinGetMinMax("ahk_id " hwnd) = 1)
+                    WinRestore "ahk_id " hwnd
+                ; 移到目标显示器的工作区中央附近（不用存的 x/y 因为那是 normal 位置，
+                ; 可能远离工作区中心，最大化是看所在显示器，移过去就行）
+                MonitorGetWorkArea targetMonitor, &tl, &tt, &tr, &tb
+                tw := Min(w, tr - tl - 160)
+                th := Min(h, tb - tt - 160)
+                tx := tl + ((tr - tl) - tw) // 2
+                ty := tt + ((tb - tt) - th) // 2
+                WinMove tx, ty, tw, th, "ahk_id " hwnd
+            }
             if (WinGetMinMax("ahk_id " hwnd) != 1)
                 WinMaximize "ahk_id " hwnd
             DebugLog("reposition maximize-only hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
