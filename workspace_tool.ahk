@@ -2465,9 +2465,11 @@ WindowReposition(hwnd, info) {
         ; Windows preserves maximized state across minimize/restore; if not,
         ; a single WinMaximize is enough. Moving first is what caused the
         ; "maximized then shrinks to safe size" regression.
-        ; BUT: 如果用户在没最大化的时候把窗口拖到了别的显示器，光 WinMaximize
-        ; 会在它当前所在显示器最大化，跨屏还原就失效。所以先看实际所在显示器
-        ; 是否和目标一致，不一致时先 WinRestore + WinMove 到目标显示器再 Maximize。
+        ; 跨屏最大化: 如果窗口当前在别的显示器，光 WinMaximize 会在原屏最大化。
+        ; 用 SetWindowPlacement 一次搞定 —— 把 rcNormalPosition 落到目标显示器，
+        ; Windows 按 rcNormalPosition 所在屏决定最大化在哪个屏。WinRestore+WinMove+
+        ; WinMaximize 的三步组合在 Chromium 系窗口上 (Firefox/Code/QQ) 不可靠，
+        ; 因为它们的 WM_SYSCOMMAND 是排队处理的，几步之间会互相打架。
         if (state = 1) {
             if (curState = -1)
                 WinRestore "ahk_id " hwnd
@@ -2478,17 +2480,8 @@ WindowReposition(hwnd, info) {
             }
             if (actualMonitor != 0 && actualMonitor != targetMonitor) {
                 DebugLog("reposition cross-monitor maximize hwnd=" hwnd " from=" actualMonitor " to=" targetMonitor)
-                ; 当前是 max 状态先 Restore，否则 WinMove 不起作用
-                if (WinGetMinMax("ahk_id " hwnd) = 1)
-                    WinRestore "ahk_id " hwnd
-                ; 移到目标显示器的工作区中央附近（不用存的 x/y 因为那是 normal 位置，
-                ; 可能远离工作区中心，最大化是看所在显示器，移过去就行）
-                MonitorGetWorkArea targetMonitor, &tl, &tt, &tr, &tb
-                tw := Min(w, tr - tl - 160)
-                th := Min(h, tb - tt - 160)
-                tx := tl + ((tr - tl) - tw) // 2
-                ty := tt + ((tb - tt) - th) // 2
-                WinMove tx, ty, tw, th, "ahk_id " hwnd
+                if !SetMaximizedOnMonitor(hwnd, targetMonitor, w, h)
+                    DebugLog("SetMaximizedOnMonitor failed hwnd=" hwnd)
             }
             if (WinGetMinMax("ahk_id " hwnd) != 1)
                 WinMaximize "ahk_id " hwnd
@@ -2739,6 +2732,38 @@ PosOnAnyMonitor(x, y, w, h) {
             return true
     }
     return false
+}
+
+; 用 SetWindowPlacement 在目标显示器上最大化窗口。
+; Windows 看 rcNormalPosition 的中心点落在哪个屏，就在哪个屏最大化。
+; 适合 Chromium 系窗口 (Firefox/Code/QQ)——AHK 的 WinRestore+WinMove+WinMaximize
+; 三步在它们身上不可靠，因为 WM_SYSCOMMAND 队列处理会让几步互相打架。
+; WINDOWPLACEMENT struct (44 bytes):
+;   UINT length, UINT flags, UINT showCmd,
+;   POINT ptMinPosition, POINT ptMaxPosition,
+;   RECT rcNormalPosition
+SetMaximizedOnMonitor(hwnd, targetMonitor, normalW, normalH) {
+    static SW_SHOWMAXIMIZED := 3
+    wp := Buffer(44, 0)
+    NumPut("uint", 44, wp, 0)
+    if !DllCall("user32\GetWindowPlacement", "ptr", hwnd, "ptr", wp)
+        return false
+    MonitorGetWorkArea targetMonitor, &tl, &tt, &tr, &tb
+    aw := tr - tl, ah := tb - tt
+    nw := Min(normalW > 0 ? normalW : aw - 160, aw - 80)
+    nh := Min(normalH > 0 ? normalH : ah - 160, ah - 80)
+    if (nw < 200)
+        nw := aw - 80
+    if (nh < 200)
+        nh := ah - 80
+    nx := tl + (aw - nw) // 2
+    ny := tt + (ah - nh) // 2
+    NumPut("int", nx,       wp, 28)  ; rcNormalPosition.left
+    NumPut("int", ny,       wp, 32)  ; rcNormalPosition.top
+    NumPut("int", nx + nw,  wp, 36)  ; rcNormalPosition.right
+    NumPut("int", ny + nh,  wp, 40)  ; rcNormalPosition.bottom
+    NumPut("uint", SW_SHOWMAXIMIZED, wp, 8)  ; showCmd
+    return DllCall("user32\SetWindowPlacement", "ptr", hwnd, "ptr", wp)
 }
 
 ;==============================================================
