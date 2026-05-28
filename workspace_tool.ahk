@@ -2298,20 +2298,25 @@ WindowLaunch(info, workspaceId := "") {
             if (vscodeUri != "")
                 info["vscodeUri"] := vscodeUri
             DebugLog("launch vscode title='" info["title"] "' folder='" info["folder"] "' uri='" vscodeUri "'")
-        }
-        if (info["exe"] = "Code.exe" && info.Has("vscodeUri") && info["vscodeUri"] != "") {
-            launchUri := VscodeUriForLaunch(info["vscodeUri"])
-            if VscodeUriIsContainer(launchUri) {
-                cmd := (info["path"] != "") ? ('"' info["path"] '" --new-window') : 'code --new-window'
-            } else if VscodeUriIsLocal(launchUri) {
-                localPath := VscodeLocalPathFromUri(launchUri)
-                cmd := (info["path"] != "")
-                    ? ('"' info["path"] '" --new-window "' localPath '"')
-                    : ('code --new-window "' localPath '"')
+            ; URI 解析得到则按 URI 启动，否则按 path/--new-window 启动一个空 Code。
+            ; 关键：无论哪条路径都必须 return，绝不允许 fall through 到下面的
+            ; firefox 分支或 path 兜底分支——后者可能因为字段串台启动错应用。
+            if (vscodeUri != "") {
+                launchUri := VscodeUriForLaunch(vscodeUri)
+                if VscodeUriIsContainer(launchUri) {
+                    cmd := (info["path"] != "") ? ('"' info["path"] '" --new-window') : 'code --new-window'
+                } else if VscodeUriIsLocal(launchUri) {
+                    localPath := VscodeLocalPathFromUri(launchUri)
+                    cmd := (info["path"] != "")
+                        ? ('"' info["path"] '" --new-window "' localPath '"')
+                        : ('code --new-window "' localPath '"')
+                } else {
+                    cmd := (info["path"] != "")
+                        ? ('"' info["path"] '" --new-window --folder-uri "' launchUri '"')
+                        : ('code --new-window --folder-uri "' launchUri '"')
+                }
             } else {
-                cmd := (info["path"] != "")
-                    ? ('"' info["path"] '" --new-window --folder-uri "' launchUri '"')
-                    : ('code --new-window --folder-uri "' launchUri '"')
+                cmd := (info["path"] != "") ? ('"' info["path"] '" --new-window') : 'code --new-window'
             }
             DebugLog("launch vscode cmd=" cmd)
             pid := LaunchProcess(cmd)
@@ -3407,11 +3412,20 @@ ApiCaptureWindow(body, query, params) {
         targetHwnd := WinExist("A")
     if !targetHwnd
         return {status: 400, contentType: "application/json", body: '{"error":"no target window"}'}
+    if !WinExist("ahk_id " targetHwnd)
+        return {status: 400, contentType: "application/json", body: '{"error":"window no longer exists"}'}
+    ; 跟 picker 和 snapshot 用同一套口径过滤，避免把脚本自身 UI、blacklist
+    ; 或 sticky 窗口加进 workspace。之前只过滤了 sticky。
+    if !WindowIsManageable(targetHwnd)
+        return {status: 400, contentType: "application/json", body: '{"error":"window not manageable"}'}
+    if WindowMatchesBlacklist(targetHwnd)
+        return {status: 400, contentType: "application/json", body: '{"error":"window matches blacklist"}'}
     if WindowMatchesSticky(targetHwnd)
         return {status: 400, contentType: "application/json", body: '{"error":"sticky window cannot be captured"}'}
     info := WindowCapture(targetHwnd)
     if !info
         return {status: 400, contentType: "application/json", body: '{"error":"could not capture"}'}
+    DebugLog("api capture-window ws='" ws["name"] "' hwnd=" targetHwnd " exe='" info["exe"] "' title='" info["title"] "'")
     ws["windows"].Push(info)
     WorkspacesSave()
     return ws
