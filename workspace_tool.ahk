@@ -1054,15 +1054,29 @@ BuildExcludeSet(currentId) {
 }
 
 
-; 把 workspace 内匹配到的窗口抬到 Z-order 顶层，并把第一个置为前台焦点。
-; 用 SetWindowPos(HWND_TOP, SWP_NOACTIVATE) 改 Z 序而不抢焦点，
-; 然后单独 WinActivate 一次，避免反复抢焦点造成"焦点跳来跳去"的体感。
-; 倒序抬升使得 list[1] (workspace 内排第一的窗口) 最终落在最上层。
+; 把 workspace 内匹配到的窗口都从最小化里拉出来并抬到 Z-order 顶层。
+; 这是为了让用户在切 workspace 后真的"看到"窗口，而不是它们在最小化状态下
+; 默默改了 z-order。先 WinRestore 所有最小化的 applied 窗口 (重复
+; WindowReposition 的工作但成本低；已 normal 的 WinRestore 是 no-op)，
+; 再用 SetWindowPos(HWND_TOP, SWP_NOACTIVATE) 倒序抬升，让 list[1] 落在最上层。
+; 故意不调 WinActivate —— admin 进程 activate 非 admin 进程窗口在某些
+; Windows 版本会触发 LockSetForegroundWindow 静默失败，让 z-order 改动看上去
+; 没生效；用户自己点哪个就 focus 哪个，更稳。
 RaiseAppliedWindows(appliedHwnds) {
     if !appliedHwnds || appliedHwnds.Length = 0
         return
     static SWP_NOSIZE := 0x0001, SWP_NOMOVE := 0x0002, SWP_NOACTIVATE := 0x0010
     flags := SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+    ; 先把最小化的拉出来
+    for h in appliedHwnds {
+        if !h
+            continue
+        try {
+            if (WinExist("ahk_id " h) && WinGetMinMax("ahk_id " h) = -1)
+                WinRestore "ahk_id " h
+        }
+    }
+    ; 倒序抬 z-order
     i := appliedHwnds.Length
     while (i >= 1) {
         h := appliedHwnds[i]
@@ -1071,7 +1085,6 @@ RaiseAppliedWindows(appliedHwnds) {
         }
         i--
     }
-    try WinActivate "ahk_id " appliedHwnds[1]
 }
 
 FocusModeApply(keepHwnds) {
