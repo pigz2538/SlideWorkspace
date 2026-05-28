@@ -439,6 +439,11 @@ NormalizeWorkspaces() {
         for win in ws["windows"] {
             if !(win is Map)
                 continue
+            ; 清理短暂尝试过的 .lnk 启动机制留下的残留字段。
+            if win.Has("shortcut") {
+                try win.Delete("shortcut")
+                migrated++
+            }
             ; Heal older VSCode snapshots that stored the whole title-derived
             ; prefix instead of the stable workspace/folder tail segment.
             if win.Has("exe") && win["exe"] = "Code.exe" && win.Has("title") {
@@ -844,6 +849,10 @@ WorkspaceRestore(id) {
             FocusModeApply(appliedHwnds)
             DebugLog("restore after focus workspace='" ws["name"] "'")
         }
+        ; 把匹配上的窗口都抬到 Z-order 顶层，激活第一个让"切换"真的"切换出来"。
+        ; 不调用 WinReposition 自带的 SetWindowPos 是因为它带 SWP_NOZORDER；
+        ; 这里专门用 HWND_TOP + SWP_NOACTIVATE 改 Z 序，最后单独 WinActivate 一次。
+        RaiseAppliedWindows(appliedHwnds)
         DebugLog("restore done workspace='" ws["name"] "' moved=" moved " missing=" missing.Length " launched=" launched " totalMs=" (A_TickCount - restoreStart))
         return true
     } finally {
@@ -1021,6 +1030,7 @@ PostLaunchPosition(id, pending) {
 
     if g_Settings["focusMode"]
         FocusModeApply(appliedHwnds)
+    RaiseAppliedWindows(appliedHwnds)
 }
 
 ; Build the "do not touch" set for restore operations: every live hwnd
@@ -1041,6 +1051,27 @@ BuildExcludeSet(currentId) {
         }
     }
     return set
+}
+
+
+; 把 workspace 内匹配到的窗口抬到 Z-order 顶层，并把第一个置为前台焦点。
+; 用 SetWindowPos(HWND_TOP, SWP_NOACTIVATE) 改 Z 序而不抢焦点，
+; 然后单独 WinActivate 一次，避免反复抢焦点造成"焦点跳来跳去"的体感。
+; 倒序抬升使得 list[1] (workspace 内排第一的窗口) 最终落在最上层。
+RaiseAppliedWindows(appliedHwnds) {
+    if !appliedHwnds || appliedHwnds.Length = 0
+        return
+    static SWP_NOSIZE := 0x0001, SWP_NOMOVE := 0x0002, SWP_NOACTIVATE := 0x0010
+    flags := SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+    i := appliedHwnds.Length
+    while (i >= 1) {
+        h := appliedHwnds[i]
+        if h {
+            try DllCall("user32\SetWindowPos", "ptr", h, "ptr", 0, "int", 0, "int", 0, "int", 0, "int", 0, "uint", flags)
+        }
+        i--
+    }
+    try WinActivate "ahk_id " appliedHwnds[1]
 }
 
 FocusModeApply(keepHwnds) {
@@ -1883,7 +1914,7 @@ FirefoxPopulateExtraTabs(hwnd, info) {
     Loop urls.Length - 1 {
         url := urls[A_Index + 1]
         try {
-            Run '"' exePath '" -new-tab "' url '"'
+            LaunchProcess('"' exePath '" -new-tab "' url '"')
             Sleep 120
         } catch as e {
             DebugLog("firefox extra-tab error url='" url "' msg='" e.Message "'")
@@ -2068,19 +2099,28 @@ WindowFindByFingerprint(info, excludeSet := 0) {
     if (info["exe"] = "firefox.exe") {
         ffStart := A_TickCount
         candidateCount := 0
+        ffSafeCandidates := []
         for hwnd in RestoreContextExeWindows("firefox.exe") {
             candidateCount += 1
             if skipExcluded(hwnd)
                 continue
             if !safeHwnd(hwnd)
                 continue
+            ffSafeCandidates.Push(hwnd)
             DebugLog("firefox candidate hwnd=" hwnd " idx=" candidateCount)
             if FirefoxTabsSupersetMatch(hwnd, info) {
                 DebugLog("match firefox tabs hwnd=" hwnd " title='" WinGetTitle("ahk_id " hwnd) "'")
                 return hwnd
             }
         }
-        DebugLog("firefox candidates done count=" candidateCount " ms=" (A_TickCount - ffStart))
+        ; tabs/URL 全对不上时，若桌面上只有一个 firefox 窗口，认它——
+        ; 单窗口不存在"抢错"风险，且用户改 URL 参数/打开关闭标签都会让
+        ; 严格匹配失败，没必要因此让它从 workspace 里消失。
+        if (ffSafeCandidates.Length = 1) {
+            DebugLog("match firefox single-candidate fallback hwnd=" ffSafeCandidates[1] " title='" WinGetTitle("ahk_id " ffSafeCandidates[1]) "'")
+            return ffSafeCandidates[1]
+        }
+        DebugLog("firefox candidates done count=" candidateCount " safe=" ffSafeCandidates.Length " ms=" (A_TickCount - ffStart))
     }
 
     ; ============================================================
@@ -2139,17 +2179,80 @@ WindowFindByFingerprint(info, excludeSet := 0) {
     if (info["exe"] != "") {
         if (info["exe"] = "Code.exe" || info["exe"] = "msedge.exe" || info["exe"] = "firefox.exe" || info["exe"] = "chrome.exe")
             return 0
+        exeCandidateCount := 0
         for hwnd in WinGetList("ahk_exe " info["exe"]) {
+            exeCandidateCount += 1
             if skipExcluded(hwnd)
                 continue
             if !safeHwnd(hwnd)
                 continue
-            if (info["exe"] = "Code.exe" || info["exe"] = "msedge.exe" || info["exe"] = "firefox.exe" || info["exe"] = "chrome.exe")
-                DebugLog("fallback exe hwnd=" hwnd " exe=" info["exe"] " title='" WinGetTitle("ahk_id " hwnd) "'")
+            DebugLog("fallback exe-only hwnd=" hwnd " exe=" info["exe"] " title='" WinGetTitle("ahk_id " hwnd) "' (storedClass='" info["class"] "' storedTitle='" info["title"] "')")
             return hwnd
         }
+        DebugLog("fallback exe-only missed exe=" info["exe"] " candidates=" exeCandidateCount " (all excluded or unsafe)")
     }
     return 0
+}
+
+; Split a command string into [exe, args]. Handles a leading quoted exe.
+ParseCmdExeArgs(cmd) {
+    cmd := Trim(cmd)
+    if (cmd = "")
+        return ["", ""]
+    if (SubStr(cmd, 1, 1) = '"') {
+        end := InStr(cmd, '"', false, 2)
+        if !end
+            return [SubStr(cmd, 2), ""]
+        return [SubStr(cmd, 2, end - 2), Trim(SubStr(cmd, end + 1))]
+    }
+    sp := InStr(cmd, " ")
+    if !sp
+        return [cmd, ""]
+    return [SubStr(cmd, 1, sp - 1), Trim(SubStr(cmd, sp + 1))]
+}
+
+; 真正的"降权启动"：通过 Shell.Application.Windows.Item(SWC_DESKTOP) 拿到
+; 已经在跑的 explorer.exe (中等完整性) 进程的 IDispatch；后续 .Document.Application
+; 一路链到 IShellDispatch2，再调 ShellExecute——这个调用会被 DCOM marshal 到
+; explorer 进程里执行，所以子进程是中等完整性的，FancyZones/拖拽等用户态工具能管。
+; 直接 ComObject("Shell.Application").ShellExecute 不行，因为 COM 对象是在我们
+; (高完整性) 进程内创建的，子进程会继承高令牌。
+ShellRun(target, args := "", workDir := "", verb := "", show := 1) {
+    static SWC_DESKTOP := 8
+    psw := ComObject("Shell.Application").Windows
+    pwb := ""
+    try pwb := psw.Item(ComValue(0x13, SWC_DESKTOP))
+    if !pwb {
+        try pwb := psw.Item(SWC_DESKTOP)
+    }
+    if !pwb
+        throw Error("ShellRun: desktop shell unavailable")
+    ; 防御：含空格的目标用引号包起来。某些 Windows 版本 IShellDispatch.ShellExecute
+    ; 的 sFile 会按空格切，不加引号就会变成"找不到 C:\Program"这种。
+    if (target != "" && SubStr(target, 1, 1) != '"' && InStr(target, " "))
+        target := '"' target '"'
+    pwb.Document.Application.ShellExecute(target, args, workDir, verb, show)
+}
+
+; 启动外部进程。守护进程是管理员时走 ShellRun (desktop IShellDispatch2 真降权)，
+; 否则走原 Run。返回 pid (走 shell 路径拿不到 pid，会返回 0；调用方按 exe baseline 兜底)。
+LaunchProcess(cmd, workingDir := "") {
+    if A_IsAdmin {
+        parsed := ParseCmdExeArgs(cmd)
+        try {
+            ShellRun(parsed[1], parsed[2], workingDir)
+            return 0
+        } catch as e {
+            DebugLog("LaunchProcess ShellRun failed cmd='" cmd "' err='" e.Message "' — falling back to Run")
+        }
+    }
+    try {
+        Run cmd, workingDir, , &pid
+        return pid ? pid : 0
+    } catch as e {
+        DebugLog("LaunchProcess Run failed cmd='" cmd "' err='" e.Message "'")
+        return 0
+    }
 }
 
 WindowLaunch(info, workspaceId := "") {
@@ -2169,7 +2272,7 @@ WindowLaunch(info, workspaceId := "") {
         launchExe := info.Has("exe") ? info["exe"] : ""
         before := (launchExe != "") ? LaunchGraceBaseline(launchExe) : 0
         if (info["exe"] = "explorer.exe" && info["folder"] != "") {
-            Run 'explorer.exe "' info["folder"] '"', , , &pid
+            pid := LaunchProcess('explorer.exe "' info["folder"] '"')
             MarkLaunchGrace("explorer.exe", pid, before, workspaceId)
             return pid
         }
@@ -2198,21 +2301,21 @@ WindowLaunch(info, workspaceId := "") {
                     : ('code --new-window --folder-uri "' launchUri '"')
             }
             DebugLog("launch vscode cmd=" cmd)
-            Run cmd, , , &pid
+            pid := LaunchProcess(cmd)
             MarkLaunchGrace("Code.exe", pid, before, workspaceId)
             return pid
         }
         if (info["exe"] = "firefox.exe") {
             cmd := FirefoxLaunchCommand(info)
             DebugLog("launch firefox cmd=" cmd)
-            Run cmd, , , &pid
+            pid := LaunchProcess(cmd)
             MarkLaunchGrace("firefox.exe", pid, before, workspaceId)
             return pid
         }
         if (info["path"] != "")
-            Run info["path"], , , &pid
+            pid := LaunchProcess('"' info["path"] '"')
         else
-            Run info["exe"], , , &pid
+            pid := LaunchProcess(info["exe"])
         MarkLaunchGrace(info["exe"], pid, before, workspaceId)
         return pid
     } catch {
