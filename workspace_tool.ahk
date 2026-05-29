@@ -39,7 +39,7 @@ global F_SETTINGS   := A_ScriptDir "\settings.json"
 global F_WORKSPACES := A_ScriptDir "\workspaces.json"
 global F_RULES      := A_ScriptDir "\rules.json"
 global F_DEBUG      := A_ScriptDir "\debug_script_out.txt"
-global DEBUG_ENABLED := false
+global DEBUG_ENABLED := true
 global D_UI         := A_ScriptDir "\ui"
 
 global g_Settings       := Map()
@@ -756,6 +756,8 @@ WorkspaceRestore(id) {
             if (info.Has("exe") && info["exe"] = "firefox.exe")
                 DebugLog("restore item firefox idx=" slotIdx " matched=" (target ? 1 : 0) " ms=" (A_TickCount - itemStart) " title='" info["title"] "'")
         }
+        while (cache.Length > list.Length)
+            cache.RemoveAt(cache.Length)
         DebugLog("restore before hwnd-cache save workspace='" ws["name"] "'")
         g_HwndCache[id] := cache
         DebugLog("restore after hwnd-cache save workspace='" ws["name"] "'")
@@ -768,10 +770,17 @@ WorkspaceRestore(id) {
                 info := item["info"]
                 idx := item["idx"]
                 DebugLog("launch missing exe=" info["exe"] " title='" info["title"] "' folder='" info["folder"] "' url='" info["url"] "'")
+                launchBefore := (info.Has("exe") && info["exe"] != "") ? LaunchGraceBaseline(info["exe"]) : 0
                 pid := WindowLaunch(info, id)
                 launched++
                 hwnd := 0
-                if pid {
+                if (info.Has("exe") && info["exe"] != "") {
+                    waitMs := info["exe"] = "firefox.exe" ? 7000 : 2500
+                    hwnd := info["exe"] = "firefox.exe"
+                        ? WaitForFirefoxWindowByInfo(info, launchBefore, excludeSet, waitMs)
+                        : WaitForNewWindowAfterBaseline(info["exe"], launchBefore, excludeSet, waitMs)
+                }
+                if !hwnd && pid {
                     for candidate in WinGetList("ahk_pid " pid) {
                         if !WindowIsManageable(candidate)
                             continue
@@ -779,22 +788,37 @@ WorkspaceRestore(id) {
                             continue
                         if WindowMatchesSticky(candidate)
                             continue
+                        if excludeSet && excludeSet.Has(candidate)
+                            continue
                         hwnd := candidate
                         break
                     }
                 }
-                if !hwnd && info.Has("exe") && info["exe"] != ""
+                if !hwnd && info.Has("exe") && info["exe"] != "" && info["exe"] != "firefox.exe"
                     hwnd := FindNewWindowFromLaunchBaseline(info["exe"], excludeSet)
                 if hwnd {
+                    positioned := false
+                    tabsPopulated := false
+                    if (info.Has("exe") && info["exe"] = "firefox.exe") {
+                        Sleep 200
+                        tabsPopulated := FirefoxPopulateExtraTabs(hwnd, info)
+                        positioned := WindowReposition(hwnd, info)
+                    } else {
+                        positioned := WindowReposition(hwnd, info)
+                    }
                     while (cache.Length < idx)
                         cache.Push(0)
                     cache[idx] := hwnd
                     PushUniqueHwnd(appliedHwnds, appliedSet, hwnd)
                     excludeSet[hwnd] := true
+                } else {
+                    positioned := false
+                    tabsPopulated := false
                 }
-                pending.Push(Map("info", info, "idx", idx, "pid", pid, "hwnd", hwnd))
+                pending.Push(Map("info", info, "idx", idx, "pid", pid, "hwnd", hwnd, "before", launchBefore, "positioned", positioned, "tabsPopulated", tabsPopulated))
             }
             if pending.Length > 0 {
+                g_HwndCache[id] := cache
                 SetTimer(((p, wid) => (*) => PostLaunchPosition(wid, p))(pending, id), -2200)
                 SetTimer(((p, wid) => (*) => PostLaunchPosition(wid, p))(pending, id), -9000)
             }
@@ -972,6 +996,9 @@ PostLaunchPosition(id, pending) {
         return
     }
     cache := g_HwndCache.Has(id) ? g_HwndCache[id] : []
+    list := ws["windows"]
+    while (cache.Length > list.Length)
+        cache.RemoveAt(cache.Length)
     excludeSet := BuildExcludeSet(id)
     appliedHwnds := []
     appliedSet := Map()
@@ -982,9 +1009,14 @@ PostLaunchPosition(id, pending) {
     for item in pending {
         info := item["info"]
         idx := item["idx"]
-        hwnd := WindowFindByFingerprint(info, excludeSet)
-        if !hwnd && info.Has("exe") && info["exe"] != ""
-            hwnd := FindNewWindowFromLaunchBaseline(info["exe"], excludeSet)
+        hwnd := 0
+        if item.Has("hwnd") && item["hwnd"] {
+            candidate := item["hwnd"]
+            if WinExist("ahk_id " candidate) && WindowIsManageable(candidate)
+                && !WindowMatchesBlacklist(candidate) && !WindowMatchesSticky(candidate)
+                && !(excludeSet && excludeSet.Has(candidate))
+                hwnd := candidate
+        }
         if !hwnd && item.Has("pid") && item["pid"] {
             for candidate in WinGetList("ahk_pid " item["pid"]) {
                 if !WindowIsManageable(candidate)
@@ -993,14 +1025,38 @@ PostLaunchPosition(id, pending) {
                     continue
                 if WindowMatchesSticky(candidate)
                     continue
+                if excludeSet && excludeSet.Has(candidate)
+                    continue
                 hwnd := candidate
                 break
             }
         }
+        if !hwnd && item.Has("before") && info.Has("exe") && info["exe"] != "" {
+            hwnd := info["exe"] = "firefox.exe"
+                ? WaitForFirefoxWindowByInfo(info, item["before"], excludeSet, 3500)
+                : WaitForNewWindowAfterBaseline(info["exe"], item["before"], excludeSet, 1500)
+        }
+        if !hwnd && info.Has("exe") && info["exe"] != "" && info["exe"] != "firefox.exe"
+            hwnd := FindNewWindowFromLaunchBaseline(info["exe"], excludeSet)
+        if !hwnd
+            hwnd := WindowFindByFingerprint(info, excludeSet)
         if hwnd {
-            if (info.Has("exe") && info["exe"] = "firefox.exe" && (!item.Has("tabsPopulated") || !item["tabsPopulated"]))
-                item["tabsPopulated"] := FirefoxPopulateExtraTabs(hwnd, info)
-            WindowReposition(hwnd, info)
+            if (info.Has("exe") && info["exe"] = "firefox.exe" && item.Has("positioned") && item["positioned"] && item.Has("tabsPopulated") && item["tabsPopulated"]) {
+                while (cache.Length < idx)
+                    cache.Push(0)
+                cache[idx] := hwnd
+                PushUniqueHwnd(appliedHwnds, appliedSet, hwnd)
+                excludeSet[hwnd] := true
+                continue
+            }
+            if (info.Has("exe") && info["exe"] = "firefox.exe") {
+                if (!item.Has("tabsPopulated") || !item["tabsPopulated"])
+                    item["tabsPopulated"] := FirefoxPopulateExtraTabs(hwnd, info)
+                WindowReposition(hwnd, info)
+                item["positioned"] := true
+            } else {
+                WindowReposition(hwnd, info)
+            }
             while (cache.Length < idx)
                 cache.Push(0)
             cache[idx] := hwnd
@@ -1266,21 +1322,34 @@ FirefoxSessionFile() {
     root := FirefoxProfilesRoot()
     if !DirExist(root)
         return ""
-    newestPath := ""
-    newestTime := ""
+    preferred := ""
+    preferredTime := ""
+    fallback := ""
+    fallbackTime := ""
     Loop Files, root "\*", "D" {
-        for rel in ["sessionstore-backups\recovery.jsonlz4", "sessionstore-backups\previous.jsonlz4", "sessionstore.jsonlz4"] {
-            candidate := A_LoopFileFullPath "\" rel
+        profileDir := A_LoopFileFullPath
+        for rel in ["sessionstore-backups\recovery.jsonlz4", "sessionstore-backups\recovery.baklz4", "sessionstore.jsonlz4"] {
+            candidate := profileDir "\" rel
             if !FileExist(candidate)
                 continue
             t := FileGetTime(candidate, "M")
-            if (newestTime = "" || t > newestTime) {
-                newestTime := t
-                newestPath := candidate
+            if (preferredTime = "" || t > preferredTime) {
+                preferredTime := t
+                preferred := candidate
+            }
+        }
+        candidate := profileDir "\sessionstore-backups\previous.jsonlz4"
+        if FileExist(candidate) {
+            t := FileGetTime(candidate, "M")
+            if (fallbackTime = "" || t > fallbackTime) {
+                fallbackTime := t
+                fallback := candidate
             }
         }
     }
-    return newestPath
+    chosen := preferred != "" ? preferred : fallback
+    DebugLog("firefox session file='" chosen "' preferred='" preferred "' fallback='" fallback "'")
+    return chosen
 }
 
 FirefoxProfileNameFromSessionFile(path) {
@@ -1319,19 +1388,18 @@ BufferEnsure(&buf, needSize, copySize := 0) {
 
 FirefoxReadSessionRaw(sessionFile) {
     static cache := Map()
-    static cacheTtlMs := 30000
     if (sessionFile = "" || !FileExist(sessionFile))
         return ""
     stamp := FileGetTime(sessionFile, "M")
     if cache.Has(sessionFile) {
         entry := cache[sessionFile]
-        if (entry["stamp"] = stamp || (A_TickCount - entry["parsedAt"] <= cacheTtlMs))
+        if (entry["stamp"] = stamp)
             return entry["data"]
     }
     raw := FirefoxReadJsonLz4(sessionFile)
     if (raw = "")
         return ""
-    cache[sessionFile] := Map("stamp", stamp, "data", raw, "parsedAt", A_TickCount)
+    cache[sessionFile] := Map("stamp", stamp, "data", raw)
     return raw
 }
 
@@ -1422,7 +1490,35 @@ FirefoxWindowTitleBase(title) {
     if (title = "")
         return ""
     title := RegExReplace(title, "\s+[—-]\s+Mozilla Firefox.*$", "")
+    title := RegExReplace(title, "\s+\S+\s+Mozilla Firefox.*$", "")
+    title := RegExReplace(title, "\s+Mozilla Firefox.*$", "")
     return Trim(title)
+}
+
+FirefoxTitlesMatch(a, b) {
+    a := FirefoxWindowTitleBase(a)
+    b := FirefoxWindowTitleBase(b)
+    if (a = "" || b = "")
+        return false
+    return (a = b) || InStr(a, b) || InStr(b, a)
+}
+
+FirefoxStateTitleMatches(state, wantedTitle) {
+    wanted := FirefoxWindowTitleBase(wantedTitle)
+    if (wanted = "")
+        return true
+    activeTitle := state.Has("activeTitle") ? state["activeTitle"] : ""
+    if FirefoxTitlesMatch(activeTitle, wanted)
+        return true
+    if state.Has("tabs") && (state["tabs"] is Array) {
+        for tab in state["tabs"] {
+            if !(tab is Map)
+                continue
+            if FirefoxTitlesMatch(tab.Has("title") ? tab["title"] : "", wanted)
+                return true
+        }
+    }
+    return false
 }
 
 JsonUnescapeString(s) {
@@ -1446,6 +1542,95 @@ JsonExtractArrayContent(raw, key) {
         return ""
     start := p + StrLen(key) + 3
     return JsonExtractBracketBody(raw, start, '[', ']')
+}
+
+JsonExtractTopLevelArrayContent(raw, key) {
+    p := JsonFindTopLevelProperty(raw, key)
+    if !p
+        return ""
+    colon := InStr(raw, ":", false, p + StrLen(key) + 1)
+    if !colon
+        return ""
+    i := colon + 1
+    len := StrLen(raw)
+    while (i <= len) {
+        ch := SubStr(raw, i, 1)
+        if (ch = " " || ch = "`t" || ch = "`r" || ch = "`n") {
+            i += 1
+            continue
+        }
+        break
+    }
+    if (SubStr(raw, i, 1) != "[")
+        return ""
+    return JsonExtractBracketBody(raw, i, '[', ']')
+}
+
+JsonExtractTopLevelIntValue(raw, key) {
+    p := JsonFindTopLevelProperty(raw, key)
+    if !p
+        return ""
+    colon := InStr(raw, ":", false, p + StrLen(key) + 1)
+    if !colon
+        return ""
+    tail := SubStr(raw, colon + 1)
+    if RegExMatch(tail, "^\s*(-?\d+)", &m)
+        return Integer(m[1])
+    return ""
+}
+
+JsonExtractTopLevelRawValue(raw, key) {
+    p := JsonFindTopLevelProperty(raw, key)
+    if !p
+        return ""
+    colon := InStr(raw, ":", false, p + StrLen(key) + 1)
+    if !colon
+        return ""
+    tail := SubStr(raw, colon + 1)
+    if RegExMatch(tail, '^\s*("((?:\\.|[^"\\])*)"|-?\d+|true|false|null)', &m) {
+        rawVal := m[1]
+        if (SubStr(rawVal, 1, 1) = '"')
+            return JsonUnescapeString(SubStr(rawVal, 2, StrLen(rawVal) - 2))
+        return rawVal
+    }
+    return ""
+}
+
+JsonFindTopLevelProperty(raw, key) {
+    depthObj := 0
+    depthArr := 0
+    inStr := false
+    esc := false
+    pat := '"' key '"'
+    len := StrLen(raw)
+    Loop len {
+        i := A_Index
+        ch := SubStr(raw, i, 1)
+        if inStr {
+            if esc
+                esc := false
+            else if (ch = "\\")
+                esc := true
+            else if (ch = '"')
+                inStr := false
+            continue
+        }
+        if (ch = '"') {
+            if (depthObj = 1 && depthArr = 0 && SubStr(raw, i, StrLen(pat)) = pat)
+                return i
+            inStr := true
+            continue
+        }
+        if (ch = "{")
+            depthObj += 1
+        else if (ch = "}")
+            depthObj -= 1
+        else if (ch = "[")
+            depthArr += 1
+        else if (ch = "]")
+            depthArr -= 1
+    }
+    return 0
 }
 
 JsonExtractBracketBody(raw, startPos, openChar, closeChar) {
@@ -1536,30 +1721,69 @@ JsonFindAllStringValues(raw, key) {
     return vals
 }
 
+JsonExtractIntValue(raw, key) {
+    if RegExMatch(raw, '"' key '":(-?\d+)', &m)
+        return Integer(m[1])
+    return ""
+}
+
+JsonExtractRawValue(raw, key) {
+    if RegExMatch(raw, '"' key '":("((?:\\.|[^"\\])*)"|-?\d+|true|false|null)', &m) {
+        rawVal := m[1]
+        if (SubStr(rawVal, 1, 1) = '"')
+            return JsonUnescapeString(SubStr(rawVal, 2, StrLen(rawVal) - 2))
+        return rawVal
+    }
+    return ""
+}
+
+FirefoxNormalizeSizeMode(rawMode) {
+    mode := Trim(rawMode)
+    if (mode = "")
+        return ""
+    lower := StrLower(mode)
+    if (lower = "maximized")
+        return 1
+    if (lower = "minimized")
+        return -1
+    if (lower = "normal")
+        return 0
+    if RegExMatch(lower, "^-?\d+$")
+        return Integer(lower)
+    return ""
+}
+
 FirefoxWindowStateFromSession(win) {
     if (Type(win) != "String" || win = "")
         return ""
     tabs := []
     selected := 1
-    if RegExMatch(win, '"selected":(\d+)', &mSel)
-        selected := Integer(mSel[1])
-    tabsContent := JsonExtractArrayContent(win, "tabs")
+    winX := JsonExtractTopLevelIntValue(win, "screenX")
+    winY := JsonExtractTopLevelIntValue(win, "screenY")
+    winW := JsonExtractTopLevelIntValue(win, "width")
+    winH := JsonExtractTopLevelIntValue(win, "height")
+    sizeMode := FirefoxNormalizeSizeMode(JsonExtractTopLevelRawValue(win, "sizemode"))
+    sel := JsonExtractTopLevelIntValue(win, "selected")
+    if (sel != "")
+        selected := sel
+    tabsContent := JsonExtractTopLevelArrayContent(win, "tabs")
     if (tabsContent = "")
         return ""
     for tab in JsonSplitTopLevelObjects(tabsContent) {
         if (tab = "")
             continue
-        idx := 1
-        if RegExMatch(tab, '"index":(\d+)', &mIdx)
-            idx := Integer(mIdx[1])
-        urls := JsonFindAllStringValues(tab, "url")
-        titles := JsonFindAllStringValues(tab, "title")
-        if (urls.Length = 0)
+        entriesContent := JsonExtractTopLevelArrayContent(tab, "entries")
+        if (entriesContent = "")
             continue
-        if (idx < 1 || idx > urls.Length)
-            idx := urls.Length
-        url := urls[idx]
-        title := (idx <= titles.Length) ? titles[idx] : ""
+        idx := JsonExtractTopLevelIntValue(tab, "index")
+        entries := JsonSplitTopLevelObjects(entriesContent)
+        if (entries.Length = 0)
+            continue
+        if (idx = "" || idx < 1 || idx > entries.Length)
+            idx := entries.Length
+        entry := entries[idx]
+        url := JsonExtractRawValue(entry, "url")
+        title := JsonExtractRawValue(entry, "title")
         if (url = "")
             continue
         tabs.Push(Map("url", url, "title", title))
@@ -1574,38 +1798,44 @@ FirefoxWindowStateFromSession(win) {
         if (tab is Map) && tab.Has("url") && tab["url"] != ""
             urlSet[tab["url"]] := true
     }
-    return Map("tabs", tabs, "activeUrl", active["url"], "activeTitle", active["title"], "urlSet", urlSet)
+    return Map(
+        "tabs", tabs,
+        "activeUrl", active["url"],
+        "activeTitle", active["title"],
+        "urlSet", urlSet,
+        "winX", winX,
+        "winY", winY,
+        "winW", winW,
+        "winH", winH,
+        "sizeMode", sizeMode)
 }
 
-FirefoxScoreSessionWindow(state, wantedTitle) {
+FirefoxScoreSessionWindow(state, wantedTitle, hwnd := 0) {
     if !(state is Map)
         return -1
+    score := hwnd ? FirefoxScoreWindowGeometry(state, hwnd) : 0
     if (wantedTitle = "")
-        return 0
+        return score
     activeTitle := state.Has("activeTitle") ? state["activeTitle"] : ""
-    if (activeTitle = wantedTitle)
-        return 100
-    if (activeTitle != "" && (InStr(activeTitle, wantedTitle) || InStr(wantedTitle, activeTitle)))
-        return 80
+    if FirefoxTitlesMatch(activeTitle, wantedTitle)
+        return score + 80
     if state.Has("tabs") && (state["tabs"] is Array) {
         for tab in state["tabs"] {
             if !(tab is Map)
                 continue
             title := tab.Has("title") ? tab["title"] : ""
-            if (title = wantedTitle)
-                return 60
-            if (title != "" && (InStr(title, wantedTitle) || InStr(wantedTitle, title)))
-                return 40
+            if FirefoxTitlesMatch(title, wantedTitle)
+                return score + 50
         }
     }
-    return 0
+    return hwnd ? score : -1
 }
 
-FirefoxExtractWindowState(sessionFile, windowTitle := "") {
+FirefoxExtractWindowState(sessionFile, windowTitle := "", hwnd := 0) {
     states := FirefoxExtractAllWindowStates(sessionFile)
     if !(states is Array) || states.Length = 0
         return ""
-    return FirefoxSelectBestWindowState(states, windowTitle)
+    return FirefoxSelectBestWindowState(states, windowTitle, hwnd)
 }
 
 FirefoxExtractAllWindowStates(sessionFile) {
@@ -1624,7 +1854,7 @@ FirefoxExtractAllWindowStates(sessionFile) {
     raw := FirefoxReadSessionRaw(sessionFile)
     if (raw = "")
         return ""
-    windowsContent := JsonExtractArrayContent(raw, "windows")
+    windowsContent := JsonExtractTopLevelArrayContent(raw, "windows")
     if (windowsContent = "")
         return ""
     states := []
@@ -1638,18 +1868,48 @@ FirefoxExtractAllWindowStates(sessionFile) {
     return states
 }
 
-FirefoxSelectBestWindowState(states, windowTitle := "") {
+FirefoxSelectBestWindowState(states, windowTitle := "", hwnd := 0) {
     wanted := FirefoxWindowTitleBase(windowTitle)
     best := ""
     bestScore := -1
+    bestSummary := ""
     for state in states {
-        score := FirefoxScoreSessionWindow(state, wanted)
+        score := FirefoxScoreSessionWindow(state, wanted, hwnd)
+        DebugLog("firefox select candidate hwnd=" hwnd " wantedTitle='" wanted "' score=" score " activeUrl='" state.Get("activeUrl", "") "' activeTitle='" state.Get("activeTitle", "") "' geom=" state.Get("winX", "") "," state.Get("winY", "") "," state.Get("winW", "") "," state.Get("winH", ""))
+        if (score < 0)
+            continue
         if (score > bestScore) {
             best := state
             bestScore := score
+            bestSummary := "activeUrl='" state.Get("activeUrl", "") "' activeTitle='" state.Get("activeTitle", "") "' geom=" state.Get("winX", "") "," state.Get("winY", "") "," state.Get("winW", "") "," state.Get("winH", "")
         }
     }
+    DebugLog("firefox select hwnd=" hwnd " wantedTitle='" wanted "' bestScore=" bestScore " " bestSummary)
     return best
+}
+
+FirefoxScoreWindowGeometry(state, hwnd) {
+    if !(state is Map) || !hwnd || !WinExist("ahk_id " hwnd)
+        return 0
+    score := 0
+    liveState := WinGetMinMax("ahk_id " hwnd)
+    stateMode := state.Has("sizeMode") ? state["sizeMode"] : ""
+    if (stateMode != "") {
+        if (stateMode = liveState)
+            score += 120
+        else
+            score -= 40
+    }
+    if !(state.Has("winX") && state.Has("winY") && state.Has("winW") && state.Has("winH"))
+        return score
+    sx := state["winX"], sy := state["winY"], sw := state["winW"], sh := state["winH"]
+    if (sx = "" || sy = "" || sw = "" || sh = "")
+        return score
+    try WinGetPos &x, &y, &w, &h, "ahk_id " hwnd
+    delta := Abs(sx - x) + Abs(sy - y) + Abs(sw - w) + Abs(sh - h)
+    if (delta = 0)
+        return score + 100
+    return score + Max(0, 90 - Floor(delta / 40))
 }
 
 FirefoxUrlsForLaunch(info) {
@@ -1700,30 +1960,21 @@ FirefoxTabsSupersetMatch(hwnd, info) {
     if !(states is Array) || states.Length = 0
         return false
     liveTitle := RestoreContextTitle(hwnd)
-    bestScore := -1
-    checked := 0
-    for state in states {
-        if !(state is Map)
-            continue
-        checked += 1
-        have := state.Has("urlSet") ? state["urlSet"] : Map()
-        ok := true
-        for u in wanted {
-            if !have.Has(u) {
-                ok := false
-                break
-            }
-        }
-        if !ok
-            continue
-        score := FirefoxScoreSessionWindow(state, FirefoxWindowTitleBase(liveTitle))
-        if (info.Has("title") && info["title"] != "")
-            score += FirefoxScoreSessionWindow(state, FirefoxWindowTitleBase(info["title"]))
-        if (score > bestScore)
-            bestScore := score
+    state := FirefoxSelectBestWindowState(states, liveTitle, hwnd)
+    if !(state is Map) {
+        DebugLog("firefox match hwnd=" hwnd " wanted=" wanted.Length " matched=0 ms=" (A_TickCount - matchStart) " liveTitle='" liveTitle "'")
+        return false
     }
-    DebugLog("firefox match hwnd=" hwnd " wanted=" wanted.Length " states=" checked " matched=" (bestScore >= 0 ? 1 : 0) " ms=" (A_TickCount - matchStart) " liveTitle='" liveTitle "'")
-    return bestScore >= 0
+    have := state.Has("urlSet") ? state["urlSet"] : Map()
+    ok := true
+    for u in wanted {
+        if !have.Has(u) {
+            ok := false
+            break
+        }
+    }
+    DebugLog("firefox match hwnd=" hwnd " wanted=" wanted.Length " matched=" (ok ? 1 : 0) " ms=" (A_TickCount - matchStart) " liveTitle='" liveTitle "'")
+    return ok
 }
 
 FirefoxTabUrls(tabs) {
@@ -1741,14 +1992,28 @@ FirefoxTabUrls(tabs) {
     return urls
 }
 
-FirefoxEnsureSessionData(&info) {
+FirefoxStateIsPlausibleForTitle(stateInfo, windowTitle) {
+    if !(stateInfo is Map)
+        return false
+    activeUrl := stateInfo.Has("activeUrl") ? stateInfo["activeUrl"] : ""
+    wanted := FirefoxWindowTitleBase(windowTitle)
+    activeTitle := stateInfo.Has("activeTitle") ? stateInfo["activeTitle"] : ""
+    if (activeUrl = "about:newtab" && wanted != "" && activeTitle != wanted)
+        return false
+    return true
+}
+
+FirefoxEnsureSessionData(&info, hwnd := 0) {
     if !(info is Map)
         return
     sessionFile := info.Has("firefoxSession") ? info["firefoxSession"] : ""
     if (sessionFile = "")
         sessionFile := FirefoxSessionFile()
     if (sessionFile = "")
+    {
+        DebugLog("firefox capture no session file hwnd=" hwnd " title='" info.Get("title", "") "'")
         return
+    }
     if !info.Has("firefoxSession") || info["firefoxSession"] = ""
         info["firefoxSession"] := sessionFile
     if (!info.Has("firefoxProfile") || info["firefoxProfile"] = "")
@@ -1759,13 +2024,20 @@ FirefoxEnsureSessionData(&info) {
     needActive := (!info.Has("firefoxActiveUrl") || info["firefoxActiveUrl"] = "")
     if !(needTabs || needActive || (info.Has("url") && info["url"] = ""))
         return
-    stateInfo := FirefoxExtractWindowState(sessionFile, info.Has("title") ? info["title"] : "")
-    if !(stateInfo is Map)
+    stateInfo := FirefoxExtractWindowState(sessionFile, info.Has("title") ? info["title"] : "", hwnd)
+    if !(stateInfo is Map) {
+        DebugLog("firefox capture no state hwnd=" hwnd " title='" info.Get("title", "") "' session='" sessionFile "'")
         return
+    }
+    if !FirefoxStateIsPlausibleForTitle(stateInfo, info.Has("title") ? info["title"] : "") {
+        DebugLog("firefox capture implausible hwnd=" hwnd " title='" info.Get("title", "") "' stateTitle='" stateInfo.Get("activeTitle", "") "' stateUrl='" stateInfo.Get("activeUrl", "") "'")
+        return
+    }
     info["firefoxTabs"] := FirefoxTabUrls(stateInfo["tabs"])
     info["firefoxActiveUrl"] := stateInfo["activeUrl"]
     if (!info.Has("url") || info["url"] = "")
         info["url"] := stateInfo["activeUrl"]
+    DebugLog("firefox capture session hwnd=" hwnd " title='" info.Get("title", "") "' url='" info["url"] "' tabs=" info["firefoxTabs"].Length)
 }
 
 RegExEscape(s) {
@@ -1898,17 +2170,10 @@ VscodeLocalPathFromUri(folderUri) {
 FirefoxLaunchCommand(info) {
     FirefoxEnsureSessionData(&info)
     exePath := info.Has("path") && info["path"] != "" ? info["path"] : "firefox.exe"
-    profilePath := info.Has("firefoxProfilePath") ? info["firefoxProfilePath"] : ""
     urls := FirefoxUrlsForLaunch(info)
-    running := ProcessExist("firefox.exe")
     cmd := '"' exePath '"'
-    if !running {
-        cmd .= ' -new-instance'
-        if (profilePath != "")
-            cmd .= ' -profile "' profilePath '"'
-    }
     if (urls.Length = 0)
-        return running ? (cmd ' -new-window about:blank') : cmd
+        return cmd ' -new-window about:blank'
     cmd .= ' -new-window "' urls[1] '"'
     return cmd
 }
@@ -1917,7 +2182,6 @@ FirefoxPopulateExtraTabs(hwnd, info) {
     urls := FirefoxUrlsForLaunch(info)
     if (urls.Length <= 1)
         return true
-    exePath := info.Has("path") && info["path"] != "" ? info["path"] : "firefox.exe"
     try {
         if hwnd {
             WinActivate "ahk_id " hwnd
@@ -1927,8 +2191,12 @@ FirefoxPopulateExtraTabs(hwnd, info) {
     Loop urls.Length - 1 {
         url := urls[A_Index + 1]
         try {
-            LaunchProcess('"' exePath '" -new-tab "' url '"')
-            Sleep 120
+            Send "^t"
+            Sleep 80
+            SendText url
+            Sleep 30
+            Send "{Enter}"
+            Sleep 180
         } catch as e {
             DebugLog("firefox extra-tab error url='" url "' msg='" e.Message "'")
             return false
@@ -2024,12 +2292,13 @@ WindowCapture(hwnd) {
         ; Firefox session handling (reads URLs from sessionstore)
         if (exe = "firefox.exe") {
             try {
+                DebugLog("capture firefox begin hwnd=" hwnd " title='" title "' geom=" x "," y "," w "," h " state=" state " monitor=" info["monitor"])
                 sessionFile := FirefoxSessionFile()
                 if (sessionFile != "") {
                     info["firefoxSession"] := sessionFile
                     info["firefoxProfile"] := FirefoxProfileNameFromSessionFile(sessionFile)
                     info["firefoxProfilePath"] := FirefoxProfilePathFromSessionFile(sessionFile)
-                    FirefoxEnsureSessionData(&info)
+                    FirefoxEnsureSessionData(&info, hwnd)
                 }
             }
         }
@@ -2047,11 +2316,12 @@ WindowResolve(info, hint, excludeSet := 0) {
         DebugLog("resolve enter firefox hint=" hint " exclude=" (excludeSet ? excludeSet.Count : 0))
     if hint {
         try {
-            if WinExist("ahk_id " hint) && !WindowMatchesSticky(hint) {
+            if WinExist("ahk_id " hint) && WindowHintMatches(info, hint, excludeSet) {
                 if (info["exe"] = "Code.exe" || info["exe"] = "msedge.exe" || info["exe"] = "firefox.exe" || info["exe"] = "chrome.exe")
                     DebugLog("resolve hint-hit hwnd=" hint " exe=" info["exe"] " title='" info["title"] "'")
                 return hint
             }
+            DebugLog("resolve hint-reject hwnd=" hint " wantedExe='" info.Get("exe", "") "'")
         }
     }
     if (info["exe"] = "Code.exe" || info["exe"] = "msedge.exe" || info["exe"] = "firefox.exe" || info["exe"] = "chrome.exe")
@@ -2059,11 +2329,31 @@ WindowResolve(info, hint, excludeSet := 0) {
     hwnd := WindowFindByFingerprint(info, excludeSet)
     if (info.Has("exe") && info["exe"] = "firefox.exe")
         DebugLog("resolve fingerprint done hwnd=" hwnd " ms=" (A_TickCount - startTick))
-    if !hwnd && info.Has("exe") && info["exe"] = "firefox.exe"
-        hwnd := FindNewWindowFromLaunchBaseline("firefox.exe", excludeSet)
     if (info.Has("exe") && info["exe"] = "firefox.exe")
         DebugLog("resolve exit firefox hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
     return hwnd
+}
+
+WindowHintMatches(info, hwnd, excludeSet := 0) {
+    if !hwnd || !WinExist("ahk_id " hwnd)
+        return false
+    if excludeSet && excludeSet.Has(hwnd)
+        return false
+    if !WindowIsManageable(hwnd)
+        return false
+    if WindowMatchesBlacklist(hwnd) || WindowMatchesSticky(hwnd)
+        return false
+    try {
+        wantedExe := info.Has("exe") ? info["exe"] : ""
+        if (wantedExe != "" && WinGetProcessName("ahk_id " hwnd) != wantedExe)
+            return false
+        wantedClass := info.Has("class") ? info["class"] : ""
+        if (wantedClass != "" && WinGetClass("ahk_id " hwnd) != wantedClass)
+            return false
+    } catch {
+        return false
+    }
+    return true
 }
 
 WindowFindByFingerprint(info, excludeSet := 0) {
@@ -2134,11 +2424,8 @@ WindowFindByFingerprint(info, excludeSet := 0) {
         ; tabs/URL 全对不上时，若桌面上只有一个 firefox 窗口，认它——
         ; 单窗口不存在"抢错"风险，且用户改 URL 参数/打开关闭标签都会让
         ; 严格匹配失败，没必要因此让它从 workspace 里消失。
-        if (ffSafeCandidates.Length = 1) {
-            DebugLog("match firefox single-candidate fallback hwnd=" ffSafeCandidates[1] " title='" WinGetTitle("ahk_id " ffSafeCandidates[1]) "'")
-            return ffSafeCandidates[1]
-        }
         DebugLog("firefox candidates done count=" candidateCount " safe=" ffSafeCandidates.Length " ms=" (A_TickCount - ffStart))
+        return 0
     }
 
     ; ============================================================
@@ -2423,6 +2710,81 @@ FindNewWindowFromLaunchBaseline(exe, excludeSet := 0) {
     return 0
 }
 
+WaitForFirefoxWindowByInfo(info, before, excludeSet := 0, timeoutMs := 7000) {
+    deadline := A_TickCount + timeoutMs
+    fallback := 0
+    while (A_TickCount <= deadline) {
+        for hwnd in WinGetList("ahk_exe firefox.exe") {
+            if excludeSet && excludeSet.Has(hwnd)
+                continue
+            if (before is Map) && before.Has(hwnd)
+                continue
+            if !WindowIsLaunchCandidate(hwnd, "firefox.exe")
+                continue
+            if WindowMatchesBlacklist(hwnd) || WindowMatchesSticky(hwnd)
+                continue
+            if !fallback
+                fallback := hwnd
+            if FirefoxTabsSupersetMatch(hwnd, info)
+                return hwnd
+        }
+        Sleep 100
+    }
+    return fallback
+}
+
+WaitForNewWindowAfterBaseline(exe, before, excludeSet := 0, timeoutMs := 2500) {
+    if (exe = "")
+        return 0
+    deadline := A_TickCount + timeoutMs
+    while (A_TickCount <= deadline) {
+        for hwnd in WinGetList("ahk_exe " exe) {
+            if excludeSet && excludeSet.Has(hwnd)
+                continue
+            if (before is Map) && before.Has(hwnd)
+                continue
+            if !WindowIsLaunchCandidate(hwnd, exe)
+                continue
+            if WindowMatchesBlacklist(hwnd)
+                continue
+            if WindowMatchesSticky(hwnd)
+                continue
+            return hwnd
+        }
+        Sleep 50
+    }
+    return 0
+}
+
+WindowIsLaunchCandidate(hwnd, exe := "") {
+    try {
+        if !DllCall("IsWindowVisible", "ptr", hwnd)
+            return false
+        if (exe != "" && WinGetProcessName("ahk_id " hwnd) != exe)
+            return false
+        cls := WinGetClass("ahk_id " hwnd)
+        static skip := Map(
+            "Shell_TrayWnd", 1, "Shell_SecondaryTrayWnd", 1,
+            "Progman", 1, "WorkerW", 1,
+            "Windows.UI.Core.CoreWindow", 1,
+            "MSCTFIME UI", 1, "Default IME", 1,
+            "TaskListThumbnailWnd", 1)
+        if skip.Has(cls)
+            return false
+        cloaked := 0
+        try DllCall("dwmapi\DwmGetWindowAttribute",
+            "ptr", hwnd, "uint", 14, "int*", &cloaked, "uint", 4)
+        if cloaked
+            return false
+        exStyle := WinGetExStyle("ahk_id " hwnd)
+        if (exStyle & 0x80)
+            return false
+        return true
+    } catch {
+        return false
+    }
+}
+
 WindowReposition(hwnd, info) {
     try {
         startTick := A_TickCount
@@ -2481,20 +2843,22 @@ WindowReposition(hwnd, info) {
         ; WinMaximize 的三步组合在 Chromium 系窗口上 (Firefox/Code/QQ) 不可靠，
         ; 因为它们的 WM_SYSCOMMAND 是排队处理的，几步之间会互相打架。
         if (state = 1) {
-            if (curState = -1)
+            if (curState != 0)
                 WinRestore "ahk_id " hwnd
             actualMonitor := 0
             try {
                 WinGetPos &ax, &ay, &aw, &ah, "ahk_id " hwnd
                 actualMonitor := MonitorAtPoint(ax + aw // 2, ay + ah // 2)
             }
-            if (actualMonitor != 0 && actualMonitor != targetMonitor) {
-                DebugLog("reposition cross-monitor maximize hwnd=" hwnd " from=" actualMonitor " to=" targetMonitor)
-                if !SetMaximizedOnMonitor(hwnd, targetMonitor, w, h)
-                    DebugLog("SetMaximizedOnMonitor failed hwnd=" hwnd)
+            DebugLog("reposition maximize placement hwnd=" hwnd " from=" actualMonitor " to=" targetMonitor)
+            if !SetMaximizedOnMonitor(hwnd, targetMonitor, w, h)
+                DebugLog("SetMaximizedOnMonitor failed hwnd=" hwnd)
+            WinMaximize "ahk_id " hwnd
+            try {
+                WinGetPos &fx, &fy, &fw, &fh, "ahk_id " hwnd
+                finalMonitor := MonitorAtPoint(fx + fw // 2, fy + fh // 2)
+                DebugLog("reposition maximize final hwnd=" hwnd " monitor=" finalMonitor " target=" targetMonitor)
             }
-            if (WinGetMinMax("ahk_id " hwnd) != 1)
-                WinMaximize "ahk_id " hwnd
             DebugLog("reposition maximize-only hwnd=" hwnd " totalMs=" (A_TickCount - startTick))
             return true
         }
